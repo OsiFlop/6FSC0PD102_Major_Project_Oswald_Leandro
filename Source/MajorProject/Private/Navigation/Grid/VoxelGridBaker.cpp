@@ -2,14 +2,14 @@
 // Builds grid over landscape, bakes max heights, and provides debug previews
 
 #include "Navigation/Grid/VoxelGridBaker.h"
-#include "Navigation/Terrain//TerrainReferenceActor.h"
+#include "Navigation/Terrain/TerrainReferenceActor.h"
 #include "Navigation/Grid/VoxelGridConfig.h"
 #include "DrawDebugHelpers.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "LandscapeProxy.h"
 #include "Navigation/Grid/VoxelHeightCache.h"
 #include "Engine/StaticMesh.h"
-#include "Navigation/Terrain//HeightQueryProbeActor.h"
+#include "Navigation/Terrain/HeightQueryProbeActor.h"
 
 // Sets default values
 AVoxelGridBaker::AVoxelGridBaker()
