@@ -9,10 +9,10 @@
 // Sets default values
 ASimple3DPathfinderActor::ASimple3DPathfinderActor()
 {
- 	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
+	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = false;
-
 }
+
 bool ASimple3DPathfinderActor::ValidateReferences() const
 {
 	if (!GridBaker)
@@ -116,10 +116,10 @@ void ASimple3DPathfinderActor::BuildVoxelSpace()
 	ZLayerCount = FMath::Max(1, FMath::CeilToInt(HeightRangeZ / VoxelSizeZCm));
 
 	UE_LOG(LogTemp, Display, TEXT("VoxelSpace gebaut: XY=%d x %d, ZLayers=%d, VoxelSizeZ=%.2fm"),
-		HeightCache->GridSize.X,
-		HeightCache->GridSize.Y,
-		ZLayerCount,
-		VoxelSizeZMeters);
+	       HeightCache->GridSize.X,
+	       HeightCache->GridSize.Y,
+	       ZLayerCount,
+	       VoxelSizeZMeters);
 }
 
 bool ASimple3DPathfinderActor::WorldToVoxel(const FVector& WorldPos, FGridVoxelCoord& OutVoxel) const
@@ -243,6 +243,34 @@ float ASimple3DPathfinderActor::GetTerrainHeightCmAtCell(const int32 X, const in
 	return HeightCache->MaxHeightCm[Index];
 }
 
+bool ASimple3DPathfinderActor::GetTerrainHeightCmAtWorldXY(float WorldX, float WorldY, float& OutTerrainHeightCm) const
+{
+	if (!HeightCache || !HeightCache->IsValid())
+	{
+		return false;
+	}
+
+	const float LocalX = WorldX - HeightCache->GridMinWorld.X;
+	const float LocalY = WorldY - HeightCache->GridMinWorld.Y;
+
+	const int32 GridX = FMath::FloorToInt(LocalX / HeightCache->CellSizeCm);
+	const int32 GridY = FMath::FloorToInt(LocalY / HeightCache->CellSizeCm);
+
+	if (GridX < 0 || GridY < 0 || GridX >= HeightCache->GridSize.X || GridY >= HeightCache->GridSize.Y)
+	{
+		return false;
+	}
+
+	const float TerrainHeightCm = GetTerrainHeightCmAtCell(GridX, GridY);
+	if (TerrainHeightCm <= -1e20f)
+	{
+		return false;
+	}
+
+	OutTerrainHeightCm = TerrainHeightCm;
+	return true;
+}
+
 bool ASimple3DPathfinderActor::IsVoxelBlocked(const FGridVoxelCoord& Voxel) const
 {
 	if (!IsVoxelInsideBounds(Voxel))
@@ -258,9 +286,63 @@ bool ASimple3DPathfinderActor::IsVoxelBlocked(const FGridVoxelCoord& Voxel) cons
 
 	const FVector VoxelCenter = VoxelToWorldCenter(Voxel);
 
-	// Phase 1 Logik:
-	// Alles im oder unter dem Terrain ist blockiert
 	return VoxelCenter.Z <= TerrainHeightCm;
+}
+
+bool ASimple3DPathfinderActor::IsMoveAllowed(const FGridVoxelCoord& From, const FGridVoxelCoord& To) const
+{
+	if (!IsVoxelInsideBounds(To) || IsVoxelBlocked(To))
+	{
+		return false;
+	}
+
+	if (!bPreventCornerCutting)
+	{
+		return true;
+	}
+
+	const int32 DX = To.X - From.X;
+	const int32 DY = To.Y - From.Y;
+	const int32 DZ = To.Z - From.Z;
+
+	const int32 ChangedAxes =
+		(DX != 0 ? 1 : 0) +
+		(DY != 0 ? 1 : 0) +
+		(DZ != 0 ? 1 : 0);
+
+	if (ChangedAxes <= 1)
+	{
+		return true;
+	}
+
+	if (DX != 0)
+	{
+		const FGridVoxelCoord StepX(From.X + DX, From.Y, From.Z);
+		if (IsVoxelBlocked(StepX))
+		{
+			return false;
+		}
+	}
+
+	if (DY != 0)
+	{
+		const FGridVoxelCoord StepY(From.X, From.Y + DY, From.Z);
+		if (IsVoxelBlocked(StepY))
+		{
+			return false;
+		}
+	}
+
+	if (DZ != 0)
+	{
+		const FGridVoxelCoord StepZ(From.X, From.Y, From.Z + DZ);
+		if (IsVoxelBlocked(StepZ))
+		{
+			return false;
+		}
+	}
+
+	return true;
 }
 
 float ASimple3DPathfinderActor::HeuristicCost(const FGridVoxelCoord& A, const FGridVoxelCoord& B) const
@@ -290,13 +372,113 @@ void ASimple3DPathfinderActor::GetNeighbors(const FGridVoxelCoord& Center, TArra
 
 				const FGridVoxelCoord Neighbor(Center.X + DX, Center.Y + DY, Center.Z + DZ);
 
-				if (IsVoxelInsideBounds(Neighbor))
+				if (!IsVoxelInsideBounds(Neighbor))
+				{
+					continue;
+				}
+
+				if (IsMoveAllowed(Center, Neighbor))
 				{
 					OutNeighbors.Add(Neighbor);
 				}
 			}
 		}
 	}
+}
+
+bool ASimple3DPathfinderActor::FindBestOpenNode(
+	const TSet<FGridVoxelCoord>& OpenSet,
+	const TMap<FGridVoxelCoord, FGridVoxelNodeRecord>& Records,
+	FGridVoxelCoord& OutBestNode
+) const
+{
+	float BestF = TNumericLimits<float>::Max();
+	bool bFound = false;
+
+	for (const FGridVoxelCoord& Candidate : OpenSet)
+	{
+		const FGridVoxelNodeRecord* Record = Records.Find(Candidate);
+		if (!Record || Record->bClosed)
+		{
+			continue;
+		}
+
+		if (Record->F < BestF)
+		{
+			BestF = Record->F;
+			OutBestNode = Candidate;
+			bFound = true;
+		}
+	}
+
+	return bFound;
+}
+
+bool ASimple3DPathfinderActor::CanTravelDirect(const FVector& From, const FVector& To) const
+{
+	const float Distance = FVector::Distance(From, To);
+	if (Distance <= KINDA_SMALL_NUMBER)
+	{
+		return true;
+	}
+
+	const float StepSize = HeightCache->CellSizeCm * 0.5f;
+	const int32 NumSteps = FMath::Max(1, FMath::CeilToInt(Distance / StepSize));
+
+	for (int32 Step = 0; Step <= NumSteps; ++Step)
+	{
+		const float Alpha = (float)Step / (float)NumSteps;
+		const FVector Sample = FMath::Lerp(From, To, Alpha);
+
+		float TerrainHeightCm = 0.0f;
+		if (!GetTerrainHeightCmAtWorldXY(Sample.X, Sample.Y, TerrainHeightCm))
+		{
+			return false;
+		}
+
+		if (Sample.Z <= TerrainHeightCm)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void ASimple3DPathfinderActor::SmoothPath()
+{
+	if (CurrentPathWorldPoints.Num() < 3)
+	{
+		return;
+	}
+
+	TArray<FVector> Smoothed;
+	int32 CurrentIndex = 0;
+	Smoothed.Add(CurrentPathWorldPoints[0]);
+
+	while (CurrentIndex < CurrentPathWorldPoints.Num() - 1)
+	{
+		int32 FurthestReachable = CurrentIndex + 1;
+
+		const int32 MaxTestIndex = FMath::Min(
+			CurrentPathWorldPoints.Num() - 1,
+			CurrentIndex + MaxSmoothSkipPoints
+		);
+
+		for (int32 TestIndex = MaxTestIndex; TestIndex > CurrentIndex; --TestIndex)
+		{
+			if (CanTravelDirect(CurrentPathWorldPoints[CurrentIndex], CurrentPathWorldPoints[TestIndex]))
+			{
+				FurthestReachable = TestIndex;
+				break;
+			}
+		}
+
+		Smoothed.Add(CurrentPathWorldPoints[FurthestReachable]);
+		CurrentIndex = FurthestReachable;
+	}
+
+	CurrentPathWorldPoints = Smoothed;
 }
 
 void ASimple3DPathfinderActor::ReconstructPath(
@@ -362,7 +544,7 @@ void ASimple3DPathfinderActor::FindPath()
 		return;
 	}
 
-	TArray<FGridVoxelCoord> OpenSet;
+	TSet<FGridVoxelCoord> OpenSet;
 	TMap<FGridVoxelCoord, FGridVoxelNodeRecord> Records;
 
 	FGridVoxelNodeRecord StartRecord;
@@ -384,33 +566,13 @@ void ASimple3DPathfinderActor::FindPath()
 	{
 		++IterationCount;
 
-		int32 BestIndex = INDEX_NONE;
-		float BestF = TNumericLimits<float>::Max();
-
-		for (int32 i = 0; i < OpenSet.Num(); ++i)
-		{
-			const FGridVoxelCoord& Candidate = OpenSet[i];
-			const FGridVoxelNodeRecord* Record = Records.Find(Candidate);
-
-			if (!Record || Record->bClosed)
-			{
-				continue;
-			}
-
-			if (Record->F < BestF)
-			{
-				BestF = Record->F;
-				BestIndex = i;
-			}
-		}
-
-		if (BestIndex == INDEX_NONE)
+		FGridVoxelCoord Current;
+		if (!FindBestOpenNode(OpenSet, Records, Current))
 		{
 			break;
 		}
 
-		const FGridVoxelCoord Current = OpenSet[BestIndex];
-		OpenSet.RemoveAtSwap(BestIndex);
+		OpenSet.Remove(Current);
 
 		FGridVoxelNodeRecord* CurrentRecord = Records.Find(Current);
 		if (!CurrentRecord)
@@ -448,11 +610,6 @@ void ASimple3DPathfinderActor::FindPath()
 
 		for (const FGridVoxelCoord& Neighbor : Neighbors)
 		{
-			if (IsVoxelBlocked(Neighbor))
-			{
-				continue;
-			}
-
 			FGridVoxelNodeRecord* ExistingNeighborRecord = Records.Find(Neighbor);
 			if (ExistingNeighborRecord && ExistingNeighborRecord->bClosed)
 			{
@@ -499,12 +656,18 @@ void ASimple3DPathfinderActor::FindPath()
 
 	ReconstructPath(Records, GoalVoxel);
 
+	if (bEnablePathSmoothing)
+	{
+		SmoothPath();
+	}
+
 	UE_LOG(LogTemp, Display, TEXT("FindPath erfolgreich. Punkte im Pfad=%d, Iterationen=%d"),
-		CurrentPathWorldPoints.Num(),
-		IterationCount);
+	       CurrentPathWorldPoints.Num(),
+	       IterationCount);
 
 	DebugDrawCurrentPath();
 }
+
 
 void ASimple3DPathfinderActor::DebugDrawCurrentPath()
 {
@@ -526,8 +689,8 @@ void ASimple3DPathfinderActor::DebugDrawCurrentPath()
 			CurrentPathWorldPoints[i],
 			CurrentPathWorldPoints[i + 1],
 			FColor::Red,
-			false,
-			DebugDrawLifetime,
+			true,
+			-1.0f,
 			0,
 			DebugLineThickness
 		);
@@ -538,8 +701,8 @@ void ASimple3DPathfinderActor::DebugDrawCurrentPath()
 			40.0f,
 			8,
 			FColor::Yellow,
-			false,
-			DebugDrawLifetime,
+			true,
+			-1.0f,
 			0,
 			2.0f
 		);
@@ -551,10 +714,22 @@ void ASimple3DPathfinderActor::DebugDrawCurrentPath()
 		40.0f,
 		8,
 		FColor::Yellow,
-		false,
-		DebugDrawLifetime,
+		true,
+		-1.0f,
 		0,
 		2.0f
 	);
 }
 
+void ASimple3DPathfinderActor::ClearCurrentPath()
+{
+	CurrentPathWorldPoints.Reset();
+
+	if (GetWorld())
+	{
+		FlushPersistentDebugLines(GetWorld());
+		FlushDebugStrings(GetWorld());
+	}
+
+	UE_LOG(LogTemp, Display, TEXT("Aktueller Pfad wurde geleert."));
+}

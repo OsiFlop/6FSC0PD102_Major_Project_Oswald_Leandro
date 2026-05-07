@@ -44,8 +44,11 @@ FORCEINLINE uint32 GetTypeHash(const FGridVoxelCoord& Coord)
 	return Hash;
 }
 
+USTRUCT()
 struct FGridVoxelNodeRecord
 {
+	GENERATED_BODY()
+
 	float G = TNumericLimits<float>::Max();
 	float H = 0.0f;
 	float F = TNumericLimits<float>::Max();
@@ -120,6 +123,18 @@ public:
 
 	UFUNCTION(CallInEditor, Category="Pathfinding")
 	void DebugDrawCurrentPath();
+	
+	UPROPERTY(EditAnywhere, Category="Pathfinding")
+	bool bPreventCornerCutting = true;
+
+	UPROPERTY(EditAnywhere, Category="Pathfinding")
+	bool bEnablePathSmoothing = true;
+
+	UPROPERTY(EditAnywhere, Category="Pathfinding|Smoothing", meta=(ClampMin="1", ClampMax="20"))
+	int32 MaxSmoothSkipPoints = 3;
+
+	UFUNCTION(CallInEditor, Category="Pathfinding")
+	void ClearCurrentPath();
 
 private:
 	bool ValidateReferences() const;
@@ -141,4 +156,18 @@ private:
 		const TMap<FGridVoxelCoord, FGridVoxelNodeRecord>& Records,
 		const FGridVoxelCoord& GoalVoxel
 	);
+
+	bool IsMoveAllowed(const FGridVoxelCoord& From, const FGridVoxelCoord& To) const;
+
+	bool GetTerrainHeightCmAtWorldXY(float WorldX, float WorldY, float& OutTerrainHeightCm) const;
+
+	bool FindBestOpenNode(
+		const TSet<FGridVoxelCoord>& OpenSet,
+		const TMap<FGridVoxelCoord, FGridVoxelNodeRecord>& Records,
+		FGridVoxelCoord& OutBestNode
+	) const;
+
+	bool CanTravelDirect(const FVector& From, const FVector& To) const;
+
+	void SmoothPath();
 };
