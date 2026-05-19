@@ -4,6 +4,7 @@
 #include "Navigation/Pathfinding/Simple3DPathfinderActor.h"
 #include "Navigation/Grid/VoxelGridBaker.h"
 #include "Navigation/Grid/VoxelHeightCache.h"
+#include "FlightProfile.h"
 #include "DrawDebugHelpers.h"
 
 // Sets default values
@@ -38,6 +39,19 @@ bool ASimple3DPathfinderActor::ValidateReferences() const
 		UE_LOG(LogTemp, Warning, TEXT("Pathfinder: StartActor oder GoalActor fehlt."));
 		return false;
 	}
+	
+	if (!FlightProfile)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Pathfinder: FlightProfile fehlt."));
+		return false;
+	}
+
+	if (FlightProfile->CruiseSpeedMetersPerSecond <= 0.0f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Pathfinder: CruiseSpeedMetersPerSecond muss > 0 sein."));
+		return false;
+	}
+
 
 	return true;
 }
@@ -286,12 +300,30 @@ bool ASimple3DPathfinderActor::IsVoxelBlocked(const FGridVoxelCoord& Voxel) cons
 
 	const FVector VoxelCenter = VoxelToWorldCenter(Voxel);
 
-	return VoxelCenter.Z <= TerrainHeightCm;
+	// Basisregel: nicht im Terrain
+	if (VoxelCenter.Z <= TerrainHeightCm)
+	{
+		return true;
+	}
+
+	// Flugzeugprofil-Regeln
+	if (!IsVoxelAllowedByFlightProfile(Voxel))
+	{
+		return true;
+	}
+
+	return false;
 }
 
 bool ASimple3DPathfinderActor::IsMoveAllowed(const FGridVoxelCoord& From, const FGridVoxelCoord& To) const
 {
 	if (!IsVoxelInsideBounds(To) || IsVoxelBlocked(To))
+	{
+		return false;
+	}
+
+	// Flugzeug-Leistungsgrenzen
+	if (!IsMoveAllowedByFlightProfile(From, To))
 	{
 		return false;
 	}
@@ -732,4 +764,108 @@ void ASimple3DPathfinderActor::ClearCurrentPath()
 	}
 
 	UE_LOG(LogTemp, Display, TEXT("Aktueller Pfad wurde geleert."));
+}
+
+float ASimple3DPathfinderActor::GetAltitudeMetersASLFromWorldZ(float WorldZCm) const
+{
+	if (!HeightCache)
+	{
+		return 0.0f;
+	}
+
+	return (WorldZCm - HeightCache->SeaLevelWorldZCm) / 100.0f;
+}
+
+float ASimple3DPathfinderActor::GetTerrainHeightMetersASLAtCell(int32 X, int32 Y) const
+{
+	const float TerrainHeightCm = GetTerrainHeightCmAtCell(X, Y);
+	if (TerrainHeightCm <= -1e20f || !HeightCache)
+	{
+		return -FLT_MAX;
+	}
+
+	return (TerrainHeightCm - HeightCache->SeaLevelWorldZCm) / 100.0f;
+}
+
+bool ASimple3DPathfinderActor::IsVoxelAllowedByFlightProfile(const FGridVoxelCoord& Voxel) const
+{
+	if (!FlightProfile)
+	{
+		return false;
+	}
+
+	if (!IsVoxelInsideBounds(Voxel))
+	{
+		return false;
+	}
+
+	const FVector VoxelCenter = VoxelToWorldCenter(Voxel);
+
+	const float VoxelAltitudeMetersASL = GetAltitudeMetersASLFromWorldZ(VoxelCenter.Z);
+	const float TerrainAltitudeMetersASL = GetTerrainHeightMetersASLAtCell(Voxel.X, Voxel.Y);
+
+	if (TerrainAltitudeMetersASL <= -FLT_MAX / 2.0f)
+	{
+		return false;
+	}
+
+	// Maximale Flughöhe
+	if (VoxelAltitudeMetersASL > FlightProfile->MaxAltitudeMetersASL)
+	{
+		return false;
+	}
+
+	// Mindestabstand zum Terrain
+	const float ClearanceMeters = VoxelAltitudeMetersASL - TerrainAltitudeMetersASL;
+	if (ClearanceMeters < FlightProfile->MinimumTerrainClearanceMeters)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool ASimple3DPathfinderActor::IsMoveAllowedByFlightProfile(const FGridVoxelCoord& From, const FGridVoxelCoord& To) const
+{
+	if (!FlightProfile)
+	{
+		return false;
+	}
+
+	const FVector FromWorld = VoxelToWorldCenter(From);
+	const FVector ToWorld = VoxelToWorldCenter(To);
+
+	const float HorizontalDistanceCm = FVector2D::Distance(
+		FVector2D(FromWorld.X, FromWorld.Y),
+		FVector2D(ToWorld.X, ToWorld.Y)
+	);
+
+	const float HorizontalDistanceMeters = HorizontalDistanceCm / 100.0f;
+
+	const float TravelTimeSeconds = FMath::Max(
+		0.001f,
+		HorizontalDistanceMeters / FlightProfile->CruiseSpeedMetersPerSecond
+	);
+
+	const float DeltaZMeters = (ToWorld.Z - FromWorld.Z) / 100.0f;
+
+	if (DeltaZMeters > 0.0f)
+	{
+		const float MaxAllowedClimbMeters = FlightProfile->MaxClimbRateMetersPerSecond * TravelTimeSeconds;
+		if (DeltaZMeters > MaxAllowedClimbMeters)
+		{
+			return false;
+		}
+	}
+
+	if (DeltaZMeters < 0.0f)
+	{
+		const float MaxAllowedDescentMeters = FlightProfile->MaxDescentRateMetersPerSecond * TravelTimeSeconds;
+		if (FMath::Abs(DeltaZMeters) > MaxAllowedDescentMeters)
+		{
+			return false;
+		}
+	}
+
+	return true;
 }

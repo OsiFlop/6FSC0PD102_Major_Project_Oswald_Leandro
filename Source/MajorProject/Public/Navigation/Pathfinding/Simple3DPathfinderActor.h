@@ -8,6 +8,7 @@
 
 class AVoxelGridBaker;
 class UVoxelHeightCache;
+class UFlightProfile;
 
 USTRUCT(BlueprintType)
 struct FGridVoxelCoord
@@ -136,6 +137,9 @@ public:
 	UFUNCTION(CallInEditor, Category="Pathfinding")
 	void ClearCurrentPath();
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="References")
+	TObjectPtr<UFlightProfile> FlightProfile;
+
 private:
 	bool ValidateReferences() const;
 
@@ -170,4 +174,10 @@ private:
 	bool CanTravelDirect(const FVector& From, const FVector& To) const;
 
 	void SmoothPath();
+
+	bool IsVoxelAllowedByFlightProfile(const FGridVoxelCoord& Voxel) const;
+	bool IsMoveAllowedByFlightProfile(const FGridVoxelCoord& From, const FGridVoxelCoord& To) const;
+
+	float GetAltitudeMetersASLFromWorldZ(float WorldZCm) const;
+	float GetTerrainHeightMetersASLAtCell(int32 X, int32 Y) const;
 };
