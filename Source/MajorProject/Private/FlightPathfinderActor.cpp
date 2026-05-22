@@ -145,10 +145,10 @@ void AFlightPathfinderActor::BuildSearchSpace()
 	ZLayerCount = FMath::Max(1, FMath::CeilToInt(HeightRangeZ / VoxelSizeZCm));
 
 	UE_LOG(LogTemp, Display, TEXT("Flight search space gebaut: XY=%d x %d, ZLayers=%d, HeadingBuckets=%d"),
-		HeightCache->GridSize.X,
-		HeightCache->GridSize.Y,
-		ZLayerCount,
-		HeadingBucketCount);
+	       HeightCache->GridSize.X,
+	       HeightCache->GridSize.Y,
+	       ZLayerCount,
+	       HeadingBucketCount);
 }
 
 // Check if state is inside search bounds
@@ -176,7 +176,8 @@ FVector AFlightPathfinderActor::StateToWorldCenter(const FFlightPathState& State
 }
 
 // Find nearest valid state for a world position
-bool AFlightPathfinderActor::WorldToNearestValidState(const FVector& WorldPos, int32 PreferredHeadingIndex, FFlightPathState& OutState) const
+bool AFlightPathfinderActor::WorldToNearestValidState(const FVector& WorldPos, int32 PreferredHeadingIndex,
+                                                      FFlightPathState& OutState) const
 {
 	if (!HeightCache || !HeightCache->IsValid() || ZLayerCount <= 0)
 	{
@@ -227,6 +228,105 @@ bool AFlightPathfinderActor::WorldToNearestValidState(const FVector& WorldPos, i
 	}
 
 	return false;
+}
+
+bool AFlightPathfinderActor::WorldToStateExact(const FVector& WorldPos, int32 HeadingIndex, FFlightPathState& OutState) const
+{
+	if (!HeightCache || !HeightCache->IsValid() || ZLayerCount <= 0)
+	{
+		return false;
+	}
+
+	const float LocalX = WorldPos.X - HeightCache->GridMinWorld.X;
+	const float LocalY = WorldPos.Y - HeightCache->GridMinWorld.Y;
+
+	const int32 GridX = FMath::FloorToInt(LocalX / HeightCache->CellSizeCm);
+	const int32 GridY = FMath::FloorToInt(LocalY / HeightCache->CellSizeCm);
+
+	if (GridX < 0 || GridY < 0 || GridX >= HeightCache->GridSize.X || GridY >= HeightCache->GridSize.Y)
+	{
+		return false;
+	}
+
+	const float VoxelSizeZCm = VoxelSizeZMeters * 100.0f;
+	const int32 GridZ = FMath::FloorToInt((WorldPos.Z - SearchMinWorld.Z) / VoxelSizeZCm);
+
+	if (GridZ < 0 || GridZ >= ZLayerCount)
+	{
+		return false;
+	}
+
+	OutState = FFlightPathState(GridX, GridY, GridZ, NormalizeHeadingIndex(HeadingIndex));
+	return true;
+}
+
+bool AFlightPathfinderActor::BuildPrimitiveSamplePoints(
+	const FFlightPathState& FromState,
+	int32 HeadingDeltaBuckets,
+	int32 VerticalMode,
+	TArray<FVector>& OutSamplePoints,
+	int32& OutEndHeading
+) const
+{
+	OutSamplePoints.Reset();
+
+	if (!FlightProfile || PrimitiveSamplesPerSegment < 2)
+	{
+		return false;
+	}
+
+	const FVector StartWorld = StateToWorldCenter(FromState);
+
+	const int32 StartHeading = FromState.HeadingIndex;
+	const int32 EndHeading = NormalizeHeadingIndex(StartHeading + HeadingDeltaBuckets);
+	OutEndHeading = EndHeading;
+
+	const float StartAngle = HeadingIndexToAngleRad(StartHeading);
+	const float EndAngle = HeadingIndexToAngleRad(EndHeading);
+
+	float SignedDeltaAngle = EndAngle - StartAngle;
+
+	while (SignedDeltaAngle > PI)
+	{
+		SignedDeltaAngle -= 2.0f * PI;
+	}
+	while (SignedDeltaAngle < -PI)
+	{
+		SignedDeltaAngle += 2.0f * PI;
+	}
+
+	const float SegmentLengthCm = PrimitiveSegmentLengthMeters * 100.0f;
+	const float StepLengthCm = SegmentLengthCm / static_cast<float>(PrimitiveSamplesPerSegment);
+
+	const float TravelTimeSeconds = PrimitiveSegmentLengthMeters / FlightProfile->CruiseSpeedMetersPerSecond;
+
+	float TotalDeltaZCm = 0.0f;
+	if (VerticalMode > 0)
+	{
+		TotalDeltaZCm = FlightProfile->MaxClimbRateMetersPerSecond * PrimitiveClimbRateFactor * TravelTimeSeconds * 100.0f;
+	}
+	else if (VerticalMode < 0)
+	{
+		TotalDeltaZCm = -FlightProfile->MaxDescentRateMetersPerSecond * PrimitiveClimbRateFactor * TravelTimeSeconds * 100.0f;
+	}
+
+	FVector CurrentWorld = StartWorld;
+	OutSamplePoints.Add(CurrentWorld);
+
+	for (int32 Step = 1; Step <= PrimitiveSamplesPerSegment; ++Step)
+	{
+		const float Alpha = static_cast<float>(Step) / static_cast<float>(PrimitiveSamplesPerSegment);
+
+		const float CurrentAngle = StartAngle + SignedDeltaAngle * Alpha;
+
+		CurrentWorld.X += FMath::Cos(CurrentAngle) * StepLengthCm;
+		CurrentWorld.Y += FMath::Sin(CurrentAngle) * StepLengthCm;
+		CurrentWorld.Z = StartWorld.Z + TotalDeltaZCm * Alpha;
+
+		OutSamplePoints.Add(CurrentWorld);
+	}
+
+	return OutSamplePoints.Num() >= 2;
 }
 
 // Check if current state reached goal voxel
@@ -410,7 +510,8 @@ bool AFlightPathfinderActor::DoesSegmentIntersectHardBlockZone(
 			continue;
 		}
 
-		if (Zone->bHardBlock && Zone->IntersectsSegmentBySampling(FromWorld, ToWorld, FromAltitudeMetersASL, ToAltitudeMetersASL))
+		if (Zone->bHardBlock && Zone->IntersectsSegmentBySampling(FromWorld, ToWorld, FromAltitudeMetersASL,
+		                                                          ToAltitudeMetersASL))
 		{
 			return true;
 		}
@@ -558,6 +659,7 @@ bool AFlightPathfinderActor::DoesSegmentRespectTerrainClearance(const FVector& F
 }
 
 // Check if transition between two states respects flight rules
+// Check if transition between two states respects flight rules
 bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, const FFlightPathState& To) const
 {
 	if (!FlightProfile)
@@ -567,6 +669,8 @@ bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, con
 
 	if (!IsStateValid(To))
 	{
+		FailureStats.InvalidTargetStateCount++;
+		LastFailureReason = ERouteFailureReason::InvalidTargetState;
 		return false;
 	}
 
@@ -576,6 +680,8 @@ bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, con
 	// Terrain clearance along segment
 	if (!DoesSegmentRespectTerrainClearance(FromWorld, ToWorld))
 	{
+		FailureStats.TerrainClearanceCount++;
+		LastFailureReason = ERouteFailureReason::TerrainClearance;
 		return false;
 	}
 
@@ -585,6 +691,8 @@ bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, con
 	// Hard influence zones along segment
 	if (DoesSegmentIntersectHardBlockZone(FromWorld, ToWorld, FromAltitudeMetersASL, ToAltitudeMetersASL))
 	{
+		FailureStats.HardBlockZoneCount++;
+		LastFailureReason = ERouteFailureReason::HardBlockZone;
 		return false;
 	}
 
@@ -610,6 +718,8 @@ bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, con
 		const float MaxAllowedClimbMeters = FlightProfile->MaxClimbRateMetersPerSecond * TravelTimeSeconds;
 		if (DeltaZMeters > MaxAllowedClimbMeters)
 		{
+			FailureStats.MaxClimbExceededCount++;
+			LastFailureReason = ERouteFailureReason::MaxClimbExceeded;
 			return false;
 		}
 	}
@@ -619,6 +729,8 @@ bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, con
 		const float MaxAllowedDescentMeters = FlightProfile->MaxDescentRateMetersPerSecond * TravelTimeSeconds;
 		if (FMath::Abs(DeltaZMeters) > MaxAllowedDescentMeters)
 		{
+			FailureStats.MaxDescentExceededCount++;
+			LastFailureReason = ERouteFailureReason::MaxDescentExceeded;
 			return false;
 		}
 	}
@@ -636,6 +748,8 @@ bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, con
 			const float ImpliedTurnRadius = HorizontalDistanceMeters / HeadingDeltaRad;
 			if (ImpliedTurnRadius < FlightProfile->MinimumTurnRadiusMeters)
 			{
+				FailureStats.TurnRadiusTooSmallCount++;
+				LastFailureReason = ERouteFailureReason::TurnRadiusTooSmall;
 				return false;
 			}
 		}
@@ -644,56 +758,171 @@ bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, con
 	return true;
 }
 
-// Generate valid neighbor states for A*
+bool AFlightPathfinderActor::ApplyMotionPrimitive(
+	const FFlightPathState& FromState,
+	int32 HeadingDeltaBuckets,
+	int32 VerticalMode,
+	FFlightPathState& OutState
+) const
+{
+	TArray<FVector> SamplePoints;
+	int32 EndHeading = 0;
+
+	if (!BuildPrimitiveSamplePoints(FromState, HeadingDeltaBuckets, VerticalMode, SamplePoints, EndHeading))
+	{
+		return false;
+	}
+
+	const FVector EndWorld = SamplePoints.Last();
+	
+	return WorldToNearestValidState(EndWorld, EndHeading, OutState);
+}
+
+bool AFlightPathfinderActor::IsMotionPrimitiveValid(
+	const FFlightPathState& FromState,
+	const FFlightPathState& ToState,
+	int32 HeadingDeltaBuckets,
+	int32 VerticalMode
+) const
+{
+	if (!FlightProfile)
+	{
+		return false;
+	}
+
+	if (!IsStateValid(ToState))
+	{
+		return false;
+	}
+
+	TArray<FVector> SamplePoints;
+	int32 EndHeading = 0;
+
+	if (!BuildPrimitiveSamplePoints(FromState, HeadingDeltaBuckets, VerticalMode, SamplePoints, EndHeading))
+	{
+		return false;
+	}
+
+	if (SamplePoints.Num() < 2)
+	{
+		return false;
+	}
+
+	// Terrain + Hard Zones entlang der gesampelten Primitive prüfen
+	for (int32 i = 0; i < SamplePoints.Num() - 1; ++i)
+	{
+		const FVector& A = SamplePoints[i];
+		const FVector& B = SamplePoints[i + 1];
+
+		if (!DoesSegmentRespectTerrainClearance(A, B))
+		{
+			return false;
+		}
+
+		const float AltA = GetAltitudeMetersASLFromWorldZ(A.Z);
+		const float AltB = GetAltitudeMetersASLFromWorldZ(B.Z);
+
+		if (DoesSegmentIntersectHardBlockZone(A, B, AltA, AltB))
+		{
+			return false;
+		}
+	}
+
+	// Gesamte Steig-/Sinkleistung über das Primitive prüfen
+	const FVector FromWorld = StateToWorldCenter(FromState);
+	const FVector ToWorld = StateToWorldCenter(ToState);
+
+	const float HorizontalDistanceCm = FVector2D::Distance(
+		FVector2D(FromWorld.X, FromWorld.Y),
+		FVector2D(ToWorld.X, ToWorld.Y)
+	);
+
+	const float HorizontalDistanceMeters = HorizontalDistanceCm / 100.0f;
+	const float TravelTimeSeconds = FMath::Max(
+		0.001f,
+		HorizontalDistanceMeters / FlightProfile->CruiseSpeedMetersPerSecond
+	);
+
+	const float DeltaZMeters = (ToWorld.Z - FromWorld.Z) / 100.0f;
+
+	if (DeltaZMeters > 0.0f)
+	{
+		const float MaxAllowedClimbMeters = FlightProfile->MaxClimbRateMetersPerSecond * TravelTimeSeconds;
+		if (DeltaZMeters > MaxAllowedClimbMeters)
+		{
+			return false;
+		}
+	}
+
+	if (DeltaZMeters < 0.0f)
+	{
+		const float MaxAllowedDescentMeters = FlightProfile->MaxDescentRateMetersPerSecond * TravelTimeSeconds;
+		if (FMath::Abs(DeltaZMeters) > MaxAllowedDescentMeters)
+		{
+			return false;
+		}
+	}
+
+	// Turn Radius über das ganze Primitive prüfen
+	const int32 HeadingDeltaAbs = FMath::Abs(HeadingDeltaBuckets);
+	if (HeadingDeltaAbs > 0 && FlightProfile->MinimumTurnRadiusMeters > 0.0f)
+	{
+		const float AnglePerBucketRad = (2.0f * PI) / static_cast<float>(HeadingBucketCount);
+		const float DeltaHeadingRad = static_cast<float>(HeadingDeltaAbs) * AnglePerBucketRad;
+
+		if (DeltaHeadingRad > KINDA_SMALL_NUMBER)
+		{
+			const float ImpliedTurnRadius = PrimitiveSegmentLengthMeters / DeltaHeadingRad;
+			if (ImpliedTurnRadius < FlightProfile->MinimumTurnRadiusMeters)
+			{
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
 void AFlightPathfinderActor::GetNeighbors(const FFlightPathState& Current, TArray<FFlightPathState>& OutNeighbors) const
 {
 	OutNeighbors.Reset();
 
-	// UniqueNeighbors: avoids duplicate states from rounded headings
 	TSet<FFlightPathState> UniqueNeighbors;
 
-	const int32 MinHeadingDelta = -MaxHeadingChangePerStep;
-	const int32 MaxHeadingDelta = MaxHeadingChangePerStep;
+	TArray<int32> HeadingOptions;
+	HeadingOptions.Add(0);
+	HeadingOptions.Add(-PrimitiveTurnDeltaBuckets);
+	HeadingOptions.Add(+PrimitiveTurnDeltaBuckets);
 
-	// VerticalOptions: same layer, optional climb, optional descent
-	TArray<int32> VerticalOptions;
-	VerticalOptions.Add(0);
+	TArray<int32> VerticalModes;
+	VerticalModes.Add(0);
 
 	if (bAllowClimbStep)
 	{
-		VerticalOptions.Add(1);
+		VerticalModes.Add(1);
 	}
 
 	if (bAllowDescentStep)
 	{
-		VerticalOptions.Add(-1);
+		VerticalModes.Add(-1);
 	}
 
-	for (int32 HeadingDelta = MinHeadingDelta; HeadingDelta <= MaxHeadingDelta; ++HeadingDelta)
+	for (const int32 HeadingDelta : HeadingOptions)
 	{
-		const int32 NewHeading = NormalizeHeadingIndex(Current.HeadingIndex + HeadingDelta);
-		const FIntPoint StepXY = HeadingIndexToGridStep(NewHeading);
-
-		if (StepXY.X == 0 && StepXY.Y == 0)
+		for (const int32 VerticalMode : VerticalModes)
 		{
-			continue;
-		}
-
-		for (const int32 DZ : VerticalOptions)
-		{
-			const FFlightPathState Candidate(
-				Current.X + StepXY.X,
-				Current.Y + StepXY.Y,
-				Current.Z + DZ,
-				NewHeading
-			);
+			FFlightPathState Candidate;
+			if (!ApplyMotionPrimitive(Current, HeadingDelta, VerticalMode, Candidate))
+			{
+				continue;
+			}
 
 			if (!IsStateInsideBounds(Candidate))
 			{
 				continue;
 			}
 
-			if (!IsTransitionValid(Current, Candidate))
+			if (!IsMotionPrimitiveValid(Current, Candidate, HeadingDelta, VerticalMode))
 			{
 				continue;
 			}
@@ -703,6 +932,12 @@ void AFlightPathfinderActor::GetNeighbors(const FFlightPathState& Current, TArra
 	}
 
 	OutNeighbors = UniqueNeighbors.Array();
+
+	if (OutNeighbors.Num() == 0)
+	{
+		FailureStats.NoValidNeighborsCount++;
+		LastFailureReason = ERouteFailureReason::NoValidNeighbors;
+	}
 }
 
 // Estimate remaining A* cost to goal
@@ -731,39 +966,116 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 
 	// Small penalty for stronger heading change
 	const int32 HeadingDeltaBuckets = GetSmallestHeadingDelta(From.HeadingIndex, To.HeadingIndex);
-	Cost += static_cast<float>(HeadingDeltaBuckets) * 25.0f;
+	const float HeadingPenalty = static_cast<float>(HeadingDeltaBuckets * HeadingDeltaBuckets) * 150.0f;
+	Cost += HeadingPenalty;
 
 	return Cost;
 }
 
-// Find open A* state with lowest F cost
-bool AFlightPathfinderActor::FindBestOpenState(
-	const TSet<FFlightPathState>& OpenSet,
+bool AFlightPathfinderActor::IsTransitionValidCached(const FFlightPathState& From, const FFlightPathState& To) const
+{
+	const FFlightTransitionKey Key(From, To);
+
+	if (const bool* CachedValue = TransitionValidityCache.Find(Key))
+	{
+		return *CachedValue;
+	}
+
+	const bool bValid = IsTransitionValid(From, To);
+	TransitionValidityCache.Add(Key, bValid);
+	return bValid;
+}
+
+float AFlightPathfinderActor::TransitionCostCached(const FFlightPathState& From, const FFlightPathState& To) const
+{
+	const FFlightTransitionKey Key(From, To);
+
+	if (const float* CachedValue = TransitionCostCache.Find(Key))
+	{
+		return *CachedValue;
+	}
+
+	const float Cost = TransitionCost(From, To);
+	TransitionCostCache.Add(Key, Cost);
+	return Cost;
+}
+
+float AFlightPathfinderActor::CalculateTurnReversalPenalty(
+	const FFlightPathState& GrandParent,
+	const FFlightPathState& Parent,
+	const FFlightPathState& Current
+) const
+{
+	const int32 PrevHeading = NormalizeHeadingIndex(Parent.HeadingIndex - GrandParent.HeadingIndex);
+	const int32 NextHeading = NormalizeHeadingIndex(Current.HeadingIndex - Parent.HeadingIndex);
+
+	int32 SignedPrevTurn = PrevHeading;
+	int32 SignedNextTurn = NextHeading;
+
+	if (SignedPrevTurn > HeadingBucketCount / 2)
+	{
+		SignedPrevTurn -= HeadingBucketCount;
+	}
+
+	if (SignedNextTurn > HeadingBucketCount / 2)
+	{
+		SignedNextTurn -= HeadingBucketCount;
+	}
+
+	// Kein echter Richtungswechsel oder ein Segment ist gerade
+	if (SignedPrevTurn == 0 || SignedNextTurn == 0)
+	{
+		return 0.0f;
+	}
+
+	// Wechsel von links nach rechts oder rechts nach links bestrafen
+	const bool bTurnDirectionChanged =
+		(SignedPrevTurn > 0 && SignedNextTurn < 0) ||
+		(SignedPrevTurn < 0 && SignedNextTurn > 0);
+
+	if (!bTurnDirectionChanged)
+	{
+		return 0.0f;
+	}
+
+	// Stärke der Strafe
+	return 2000.0f;
+}
+
+bool AFlightPathfinderActor::PopBestOpenStateFromHeap(
+	TArray<FFlightOpenEntry>& OpenHeap,
 	const TMap<FFlightPathState, FFlightPathNodeRecord>& Records,
 	FFlightPathState& OutBestState
 ) const
 {
-	float BestF = TNumericLimits<float>::Max();
-	bool bFound = false;
-
-	// OpenSet: states waiting for A* check
-	for (const FFlightPathState& Candidate : OpenSet)
+	while (OpenHeap.Num() > 0)
 	{
-		const FFlightPathNodeRecord* Record = Records.Find(Candidate);
-		if (!Record || Record->bClosed)
+		FFlightOpenEntry BestEntry;
+		OpenHeap.HeapPop(BestEntry, FFlightOpenEntryMinHeapPredicate());
+
+		const FFlightPathNodeRecord* Record = Records.Find(BestEntry.State);
+		if (!Record)
 		{
 			continue;
 		}
 
-		if (Record->F < BestF)
+		// Veraltete Heap-Einträge ignorieren
+		if (Record->bClosed)
 		{
-			BestF = Record->F;
-			OutBestState = Candidate;
-			bFound = true;
+			continue;
 		}
+
+		// Nur aktuellster F-Wert ist gültig
+		if (!FMath::IsNearlyEqual(Record->F, BestEntry.FScore, KINDA_SMALL_NUMBER))
+		{
+			continue;
+		}
+
+		OutBestState = BestEntry.State;
+		return true;
 	}
 
-	return bFound;
+	return false;
 }
 
 // Rebuild route from A* parent records
@@ -858,6 +1170,10 @@ float AFlightPathfinderActor::CalculateTotalClimbMeters() const
 void AFlightPathfinderActor::FindFlightRoute()
 {
 	CurrentRouteWorldPoints.Reset();
+	TransitionValidityCache.Reset();
+	TransitionCostCache.Reset();
+	FailureStats.Reset();
+	LastFailureReason = ERouteFailureReason::None;
 
 	// Auto-link height cache from baker
 	if (!HeightCache && GridBaker && GridBaker->HeightCache)
@@ -906,8 +1222,8 @@ void AFlightPathfinderActor::FindFlightRoute()
 		return;
 	}
 
-	// OpenSet: states waiting for A* evaluation
-	TSet<FFlightPathState> OpenSet;
+	// OpenHeap: priority queue for open states
+	TArray<FFlightOpenEntry> OpenHeap;
 
 	// Records: cost, parent and closed state for all touched states
 	TMap<FFlightPathState, FFlightPathNodeRecord> Records;
@@ -916,12 +1232,15 @@ void AFlightPathfinderActor::FindFlightRoute()
 	FFlightPathNodeRecord StartRecord;
 	StartRecord.G = 0.0f;
 	StartRecord.H = HeuristicCost(StartState, GoalState);
-	StartRecord.F = StartRecord.G + StartRecord.H;
+	StartRecord.F = StartRecord.G + HeuristicWeight * StartRecord.H;
 	StartRecord.bHasParent = false;
 	StartRecord.bClosed = false;
 
 	Records.Add(StartState, StartRecord);
-	OpenSet.Add(StartState);
+	OpenHeap.HeapPush(
+		FFlightOpenEntry(StartState, StartRecord.F),
+		FFlightOpenEntryMinHeapPredicate()
+	);
 
 	int32 ExpandedCount = 0;
 	const int32 MaxExpandedStates = 500000;
@@ -930,17 +1249,15 @@ void AFlightPathfinderActor::FindFlightRoute()
 	// ReachedGoalState: actual found goal state
 	FFlightPathState ReachedGoalState;
 
-	while (OpenSet.Num() > 0 && ExpandedCount < MaxExpandedStates)
+	while (OpenHeap.Num() > 0 && ExpandedCount < MaxExpandedStates)
 	{
 		++ExpandedCount;
 
 		FFlightPathState Current;
-		if (!FindBestOpenState(OpenSet, Records, Current))
+		if (!PopBestOpenStateFromHeap(OpenHeap, Records, Current))
 		{
 			break;
 		}
-
-		OpenSet.Remove(Current);
 
 		FFlightPathNodeRecord* CurrentRecord = Records.Find(Current);
 		if (!CurrentRecord)
@@ -957,6 +1274,8 @@ void AFlightPathfinderActor::FindFlightRoute()
 		CurrentRecord->bClosed = true;
 
 		const float CurrentG = CurrentRecord->G;
+		const bool bCurrentHasParent = CurrentRecord->bHasParent;
+		const FFlightPathState CurrentParent = CurrentRecord->Parent;
 
 		// Optional debug for visited states
 		if (bDrawVisitedStates && GetWorld())
@@ -989,8 +1308,7 @@ void AFlightPathfinderActor::FindFlightRoute()
 				continue;
 			}
 
-			// TentativeG: new possible cost from start to neighbor
-			const float TentativeG = CurrentG + TransitionCost(Current, Neighbor);
+			float TentativeG = CurrentG + TransitionCostCached(Current, Neighbor);
 
 			bool bShouldUpdate = false;
 
@@ -1015,18 +1333,37 @@ void AFlightPathfinderActor::FindFlightRoute()
 			// Store better route to neighbor
 			ExistingRecord->G = TentativeG;
 			ExistingRecord->H = HeuristicCost(Neighbor, GoalState);
-			ExistingRecord->F = ExistingRecord->G + ExistingRecord->H;
+			ExistingRecord->F = ExistingRecord->G + HeuristicWeight * ExistingRecord->H;
 			ExistingRecord->Parent = Current;
 			ExistingRecord->bHasParent = true;
 			ExistingRecord->bClosed = false;
 
-			OpenSet.Add(Neighbor);
+			OpenHeap.HeapPush(
+				FFlightOpenEntry(Neighbor, ExistingRecord->F),
+				FFlightOpenEntryMinHeapPredicate()
+			);
 		}
 	}
 
 	if (!bFoundRoute)
 	{
+		if (ExpandedCount >= MaxExpandedStates)
+		{
+			LastFailureReason = ERouteFailureReason::MaxExpandedStatesReached;
+		}
+
 		UE_LOG(LogTemp, Warning, TEXT("FindFlightRoute: Keine Route gefunden. ExpandedStates=%d"), ExpandedCount);
+
+		UE_LOG(LogTemp, Warning, TEXT("Failure Summary: Terrain=%d, HardZone=%d, Climb=%d, Descent=%d, TurnRadius=%d, InvalidTarget=%d, NoNeighbors=%d"),
+			FailureStats.TerrainClearanceCount,
+			FailureStats.HardBlockZoneCount,
+			FailureStats.MaxClimbExceededCount,
+			FailureStats.MaxDescentExceededCount,
+			FailureStats.TurnRadiusTooSmallCount,
+			FailureStats.InvalidTargetStateCount,
+			FailureStats.NoValidNeighborsCount
+		);
+
 		return;
 	}
 
@@ -1039,7 +1376,9 @@ void AFlightPathfinderActor::FindFlightRoute()
 	UE_LOG(
 		LogTemp,
 		Display,
-		TEXT("FindFlightRoute erfolgreich. Wegpunkte=%d, ExpandedStates=%d, RouteLength=%.2f m, NetAltitudeChange=%.2f m, TotalClimb=%.2f m"),
+		TEXT(
+			"FindFlightRoute erfolgreich. Wegpunkte=%d, ExpandedStates=%d, RouteLength=%.2f m, NetAltitudeChange=%.2f m, TotalClimb=%.2f m"
+		),
 		CurrentRouteWorldPoints.Num(),
 		ExpandedCount,
 		RouteLengthMeters,

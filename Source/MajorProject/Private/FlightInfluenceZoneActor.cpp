@@ -2,8 +2,8 @@
 // Defines 3D zones for route restrictions or extra traversal cost
 // Used by pathfinding to avoid or penalize specific airspace areas
 
-#include "Components/BoxComponent.h"
 #include "FlightInfluenceZoneActor.h"
+#include "Components/BoxComponent.h"
 
 // Sets default values
 AFlightInfluenceZoneActor::AFlightInfluenceZoneActor()

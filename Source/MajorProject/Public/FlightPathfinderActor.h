@@ -54,6 +54,50 @@ struct FFlightPathState
 	}
 };
 
+UENUM()
+enum class ERouteFailureReason : uint8
+{
+	None,
+	OutOfBounds,
+	InvalidTargetState,
+	TerrainClearance,
+	HardBlockZone,
+	MaxClimbExceeded,
+	MaxDescentExceeded,
+	TurnRadiusTooSmall,
+	GoalStateInvalid,
+	StartStateInvalid,
+	MaxExpandedStatesReached,
+	NoValidNeighbors
+};
+
+USTRUCT()
+struct FRouteFailureStats
+{
+	GENERATED_BODY()
+
+	int32 OutOfBoundsCount = 0;
+	int32 InvalidTargetStateCount = 0;
+	int32 TerrainClearanceCount = 0;
+	int32 HardBlockZoneCount = 0;
+	int32 MaxClimbExceededCount = 0;
+	int32 MaxDescentExceededCount = 0;
+	int32 TurnRadiusTooSmallCount = 0;
+	int32 NoValidNeighborsCount = 0;
+
+	void Reset()
+	{
+		OutOfBoundsCount = 0;
+		InvalidTargetStateCount = 0;
+		TerrainClearanceCount = 0;
+		HardBlockZoneCount = 0;
+		MaxClimbExceededCount = 0;
+		MaxDescentExceededCount = 0;
+		TurnRadiusTooSmallCount = 0;
+		NoValidNeighborsCount = 0;
+	}
+};
+
 // Hash flight state for TMap / TSet usage
 FORCEINLINE uint32 GetTypeHash(const FFlightPathState& State)
 {
@@ -77,18 +121,70 @@ struct FFlightPathNodeRecord
 	// H: estimated cost from this state to goal
 	float H = 0.0f;
 
-	// F: total priority cost, G + H
+	// F: total priority cost, G + HeuristicWeight * H
 	float F = TNumericLimits<float>::Max();
 
 	// Parent: previous state in best known route
 	FFlightPathState Parent;
-	
+
 	// bHasParent: false for start state
 	bool bHasParent = false;
 
 	// bClosed: already fully checked by A*
 	bool bClosed = false;
 };
+
+USTRUCT()
+struct FFlightOpenEntry
+{
+	GENERATED_BODY()
+
+	FFlightPathState State;
+	float FScore = 0.0f;
+
+	FFlightOpenEntry() = default;
+
+	FFlightOpenEntry(const FFlightPathState& InState, float InFScore)
+		: State(InState), FScore(InFScore)
+	{
+	}
+};
+
+struct FFlightOpenEntryMinHeapPredicate
+{
+	bool operator()(const FFlightOpenEntry& A, const FFlightOpenEntry& B) const
+	{
+		return A.FScore < B.FScore;
+	}
+};
+
+USTRUCT()
+struct FFlightTransitionKey
+{
+	GENERATED_BODY()
+
+	FFlightPathState From;
+	FFlightPathState To;
+
+	FFlightTransitionKey() = default;
+
+	FFlightTransitionKey(const FFlightPathState& InFrom, const FFlightPathState& InTo)
+		: From(InFrom), To(InTo)
+	{
+	}
+
+	bool operator==(const FFlightTransitionKey& Other) const
+	{
+		return From == Other.From && To == Other.To;
+	}
+};
+
+FORCEINLINE uint32 GetTypeHash(const FFlightTransitionKey& Key)
+{
+	uint32 Hash = GetTypeHash(Key.From);
+	Hash = HashCombine(Hash, GetTypeHash(Key.To));
+	return Hash;
+}
 
 UCLASS()
 class MAJORPROJECT_API AFlightPathfinderActor : public AActor
@@ -169,6 +265,12 @@ public:
 	// DebugVisitedPointSize: point size for visited states
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Debug", meta=(ClampMin="0.0"))
 	float DebugVisitedPointSize = 16.0f;
+	
+	UPROPERTY(VisibleAnywhere, Category="Debug")
+	mutable FRouteFailureStats FailureStats;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Debug")
+	mutable ERouteFailureReason LastFailureReason = ERouteFailureReason::None;
 
 	// SearchMinWorld: minimum world-space bounds of search space
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
@@ -181,6 +283,9 @@ public:
 	// ZLayerCount: amount of vertical search layers
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
 	int32 ZLayerCount = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="1.0"))
+	float HeuristicWeight = 1.2f;
 
 	// CurrentRouteWorldPoints: final route as world-space positions
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Result")
@@ -202,25 +307,62 @@ public:
 	UFUNCTION(CallInEditor, Category="Flight Pathfinding")
 	void ClearCurrentRoute();
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="100.0"))
+	float PrimitiveSegmentLengthMeters = 400.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="2", ClampMax="32"))
+	int32 PrimitiveSamplesPerSegment = 8;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="0.1", ClampMax="1.0"))
+	float PrimitiveClimbRateFactor = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="1", ClampMax="4"))
+	int32 PrimitiveTurnDeltaBuckets = 1;
+
 protected:
 	// Check required references and profile values
 	bool ValidateReferences() const;
 
 	// Check state inside built search bounds
 	bool IsStateInsideBounds(const FFlightPathState& State) const;
-	
+
 	// Convert state to world-space center position
 	FVector StateToWorldCenter(const FFlightPathState& State) const;
 
 	// Find nearest valid state around world position
-	bool WorldToNearestValidState(const FVector& WorldPos, int32 PreferredHeadingIndex, FFlightPathState& OutState) const;
+	bool WorldToNearestValidState(const FVector& WorldPos, int32 PreferredHeadingIndex,
+	                              FFlightPathState& OutState) const;
+	
+	bool WorldToStateExact(const FVector& WorldPos, int32 HeadingIndex, FFlightPathState& OutState) const;
+
+	bool BuildPrimitiveSamplePoints(
+		const FFlightPathState& FromState,
+		int32 HeadingDeltaBuckets,
+		int32 VerticalMode,
+		TArray<FVector>& OutSamplePoints,
+		int32& OutEndHeading
+	) const;
+
+	bool ApplyMotionPrimitive(
+		const FFlightPathState& FromState,
+		int32 HeadingDeltaBuckets,
+		int32 VerticalMode,
+		FFlightPathState& OutState
+	) const;
+
+	bool IsMotionPrimitiveValid(
+		const FFlightPathState& FromState,
+		const FFlightPathState& ToState,
+		int32 HeadingDeltaBuckets,
+		int32 VerticalMode
+	) const;
 
 	// Check if current state reaches goal position
 	bool IsGoalState(const FFlightPathState& Current, const FFlightPathState& Goal) const;
 
 	// Normalize heading index into valid bucket range
 	int32 NormalizeHeadingIndex(int32 HeadingIndex) const;
-	
+
 	// Convert heading bucket to angle in radians
 	float HeadingIndexToAngleRad(int32 HeadingIndex) const;
 
@@ -238,7 +380,7 @@ protected:
 
 	// Get terrain height from world X / Y position
 	bool GetTerrainHeightCmAtWorldXY(float WorldX, float WorldY, float& OutTerrainHeightCm) const;
-	
+
 	// Convert Unreal world Z to altitude in meters ASL
 	float GetAltitudeMetersASLFromWorldZ(float WorldZCm) const;
 
@@ -282,12 +424,14 @@ protected:
 	// Calculate movement cost between two states
 	float TransitionCost(const FFlightPathState& From, const FFlightPathState& To) const;
 
-	// Find open A* state with lowest F cost
-	bool FindBestOpenState(
-		const TSet<FFlightPathState>& OpenSet,
+	bool PopBestOpenStateFromHeap(
+		TArray<FFlightOpenEntry>& OpenHeap,
 		const TMap<FFlightPathState, FFlightPathNodeRecord>& Records,
 		FFlightPathState& OutBestState
 	) const;
+
+	bool IsTransitionValidCached(const FFlightPathState& From, const FFlightPathState& To) const;
+	float TransitionCostCached(const FFlightPathState& From, const FFlightPathState& To) const;
 
 	// Rebuild route from A* parent records
 	void ReconstructRoute(
@@ -303,4 +447,13 @@ protected:
 
 	// Calculate summed positive climb over route
 	float CalculateTotalClimbMeters() const;
+
+	mutable TMap<FFlightTransitionKey, bool> TransitionValidityCache;
+	mutable TMap<FFlightTransitionKey, float> TransitionCostCache;
+
+	float CalculateTurnReversalPenalty(
+	const FFlightPathState& GrandParent,
+	const FFlightPathState& Parent,
+	const FFlightPathState& Current
+) const;
 };
