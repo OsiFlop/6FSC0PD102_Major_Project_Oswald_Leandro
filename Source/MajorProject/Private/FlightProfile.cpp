@@ -1,5 +1,5 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
+// Flight profile data asset
+// Stores aircraft limits and safety values
+// Used by pathfinding and route checks
 
 #include "FlightProfile.h"
-

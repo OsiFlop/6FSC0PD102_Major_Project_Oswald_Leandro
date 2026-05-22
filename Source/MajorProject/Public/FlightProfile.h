@@ -1,4 +1,6 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+// Flight profile data asset
+// Stores aircraft limits and safety values
+// Used by pathfinding and route checks
 
 #pragma once
 
@@ -7,7 +9,8 @@
 #include "FlightProfile.generated.h"
 
 /**
- * 
+ * Aircraft profile settings
+ * Editable asset for aircraft performance data
  */
 UCLASS(BlueprintType)
 class MAJORPROJECT_API UFlightProfile : public UDataAsset
@@ -15,36 +18,39 @@ class MAJORPROJECT_API UFlightProfile : public UDataAsset
 	GENERATED_BODY()
 
 public:
-	// Anzeigename des Flugzeugs
+	// AircraftName: display name / profile identifier
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aircraft")
 	FString AircraftName;
 
-	// Maximale Flughöhe in Metern über Meer
+	// MaxAltitudeMetersASL: highest allowed altitude above sea level
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aircraft", meta=(ClampMin="0.0"))
 	float MaxAltitudeMetersASL = 0.0f;
 
-	// Reisegeschwindigkeit in Metern pro Sekunde
+	// CruiseSpeedMetersPerSecond: normal flight speed used for time estimates
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aircraft", meta=(ClampMin="0.0"))
 	float CruiseSpeedMetersPerSecond = 0.0f;
 
-	// Maximale Steigrate in Metern pro Sekunde
+	// MaxClimbRateMetersPerSecond: maximum vertical climb speed
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aircraft", meta=(ClampMin="0.0"))
 	float MaxClimbRateMetersPerSecond = 0.0f;
 
-	// Maximale Sinkrate in Metern pro Sekunde
+	// MaxDescentRateMetersPerSecond: maximum vertical descent speed
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aircraft", meta=(ClampMin="0.0"))
 	float MaxDescentRateMetersPerSecond = 0.0f;
 
-	// Mindestabstand zum Terrain in Metern
+	// MinimumTerrainClearanceMeters: required safety distance above terrain
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Safety", meta=(ClampMin="0.0"))
 	float MinimumTerrainClearanceMeters = 0.0f;
 
-	// Reichweite in Kilometern
+	// RangeMeters: maximum flight distance for this aircraft
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aircraft", meta=(ClampMin="0.0"))
 	float RangeMeters = 0.0f;
 
-	// Stall Speed in Knoten
+	// StallSpeedMetersPerSecond: minimum safe airspeed
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aircraft", meta=(ClampMin="0.0"))
 	float StallSpeedMetersPerSecond = 0.0f;
-	
+
+	// MinimumTurnRadiusMeters: smallest possible (safe) turn radius 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aircraft", meta=(ClampMin="0.0"))
+	float MinimumTurnRadiusMeters = 0.0f;
 };
