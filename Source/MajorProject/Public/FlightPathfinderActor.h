@@ -8,6 +8,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "RouteFailureReason.h"
+#include "RouteCalculationResult.h"
 #include "FlightPathfinderActor.generated.h"
 
 class AVoxelGridBaker;
@@ -52,23 +54,6 @@ struct FFlightPathState
 	{
 		return X == Other.X && Y == Other.Y && Z == Other.Z && HeadingIndex == Other.HeadingIndex;
 	}
-};
-
-UENUM()
-enum class ERouteFailureReason : uint8
-{
-	None,
-	OutOfBounds,
-	InvalidTargetState,
-	TerrainClearance,
-	HardBlockZone,
-	MaxClimbExceeded,
-	MaxDescentExceeded,
-	TurnRadiusTooSmall,
-	GoalStateInvalid,
-	StartStateInvalid,
-	MaxExpandedStatesReached,
-	NoValidNeighbors
 };
 
 USTRUCT()
@@ -291,6 +276,9 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Result")
 	TArray<FVector> CurrentRouteWorldPoints;
 
+	UPROPERTY(BlueprintReadOnly, Category = "Flight Pathfinding|Debug")
+	int32 LastExpandedStates = 0;
+
 	// Build 3D search space from terrain cache
 	UFUNCTION(CallInEditor, Category="Flight Pathfinding")
 	void BuildSearchSpace();
@@ -318,6 +306,18 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="1", ClampMax="4"))
 	int32 PrimitiveTurnDeltaBuckets = 1;
+
+	UFUNCTION(BlueprintCallable, Category = "Flight Pathfinding")
+	FRouteCalculationResult CalculateFlightRouteForUI(
+		FVector StartWorldLocation,
+		FVector TargetWorldLocation,
+		float StartAltitudeMetersASL,
+		float TargetAltitudeMetersASL,
+		UFlightProfile* InFlightProfile
+	);
+
+	UFUNCTION(BlueprintCallable, Category = "Flight Pathfinding")
+	FText GetFailureReasonText(ERouteFailureReason Reason) const;
 
 protected:
 	// Check required references and profile values
@@ -456,4 +456,18 @@ protected:
 	const FFlightPathState& Parent,
 	const FFlightPathState& Current
 ) const;
+
+	bool RunFlightRouteSearch(
+	const FVector& StartWorldLocation,
+	const FVector& TargetWorldLocation,
+	UFlightProfile* InFlightProfile,
+	TArray<FVector>& OutRoutePoints
+);
+
+	bool ValidateCoreReferences() const;
+
+	void BuildSearchSpaceForRoute(
+	const FVector& StartWorldLocation,
+	const FVector& TargetWorldLocation
+);
 };

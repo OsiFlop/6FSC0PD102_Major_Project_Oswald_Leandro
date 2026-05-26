@@ -69,6 +69,47 @@ bool AFlightPathfinderActor::ValidateReferences() const
 	return true;
 }
 
+bool AFlightPathfinderActor::ValidateCoreReferences() const
+{
+	if (!GridBaker)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: GridBaker fehlt."));
+		return false;
+	}
+
+	if (!HeightCache)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeightCache fehlt."));
+		return false;
+	}
+
+	if (!HeightCache->IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeightCache ist ungueltig."));
+		return false;
+	}
+
+	if (!FlightProfile)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: FlightProfile fehlt."));
+		return false;
+	}
+
+	if (FlightProfile->CruiseSpeedMetersPerSecond <= 0.0f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: CruiseSpeedMetersPerSecond muss > 0 sein."));
+		return false;
+	}
+
+	if (HeadingBucketCount < 4)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeadingBucketCount muss >= 4 sein."));
+		return false;
+	}
+
+	return true;
+}
+
 // Build 3D search space from terrain height range
 void AFlightPathfinderActor::BuildSearchSpace()
 {
@@ -151,6 +192,147 @@ void AFlightPathfinderActor::BuildSearchSpace()
 	       HeadingBucketCount);
 }
 
+void AFlightPathfinderActor::BuildSearchSpaceForRoute(
+	const FVector& StartWorldLocation,
+	const FVector& TargetWorldLocation
+)
+{
+	if (!HeightCache && GridBaker && GridBaker->HeightCache)
+	{
+		HeightCache = GridBaker->HeightCache;
+	}
+
+	if (!HeightCache || !HeightCache->IsValid())
+	{
+		UE_LOG(LogTemp, Warning,
+		       TEXT("BuildSearchSpaceForRoute fehlgeschlagen: HeightCache fehlt oder ist ungueltig."));
+		return;
+	}
+
+	if (VoxelSizeZMeters <= 0.0f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("BuildSearchSpaceForRoute fehlgeschlagen: VoxelSizeZMeters muss > 0 sein."));
+		return;
+	}
+
+	float MinTerrainZ = TNumericLimits<float>::Max();
+	float MaxTerrainZ = -TNumericLimits<float>::Max();
+
+	for (const float HeightCm : HeightCache->MaxHeightCm)
+	{
+		if (HeightCm <= -1e20f)
+		{
+			continue;
+		}
+
+		MinTerrainZ = FMath::Min(MinTerrainZ, HeightCm);
+		MaxTerrainZ = FMath::Max(MaxTerrainZ, HeightCm);
+	}
+
+	if (MinTerrainZ == TNumericLimits<float>::Max() || MaxTerrainZ == -TNumericLimits<float>::Max())
+	{
+		UE_LOG(LogTemp, Warning,
+		       TEXT("BuildSearchSpaceForRoute fehlgeschlagen: Keine gueltigen Terrainhoehen im Cache."));
+		return;
+	}
+
+	const float VoxelSizeZCm = VoxelSizeZMeters * 100.0f;
+
+	float MinRelevantZ = MinTerrainZ;
+	float MaxRelevantZ = MaxTerrainZ;
+
+	// Wichtig: Hier werden Start- und Zielhöhe aus dem UI berücksichtigt.
+	MinRelevantZ = FMath::Min(MinRelevantZ, StartWorldLocation.Z);
+	MaxRelevantZ = FMath::Max(MaxRelevantZ, StartWorldLocation.Z);
+
+	MinRelevantZ = FMath::Min(MinRelevantZ, TargetWorldLocation.Z);
+	MaxRelevantZ = FMath::Max(MaxRelevantZ, TargetWorldLocation.Z);
+
+	SearchMinWorld.X = HeightCache->GridMinWorld.X;
+	SearchMinWorld.Y = HeightCache->GridMinWorld.Y;
+	SearchMinWorld.Z = MinRelevantZ - (ExtraBottomLayers * VoxelSizeZCm);
+
+	SearchMaxWorld.X = HeightCache->GridMinWorld.X + (HeightCache->GridSize.X * HeightCache->CellSizeCm);
+	SearchMaxWorld.Y = HeightCache->GridMinWorld.Y + (HeightCache->GridSize.Y * HeightCache->CellSizeCm);
+	SearchMaxWorld.Z = MaxRelevantZ + (ExtraTopLayers * VoxelSizeZCm);
+
+	const float HeightRangeZ = SearchMaxWorld.Z - SearchMinWorld.Z;
+	ZLayerCount = FMath::Max(1, FMath::CeilToInt(HeightRangeZ / VoxelSizeZCm));
+
+	UE_LOG(LogTemp, Display, TEXT("Flight search space fuer UI gebaut: XY=%d x %d, ZLayers=%d, HeadingBuckets=%d"),
+	       HeightCache->GridSize.X,
+	       HeightCache->GridSize.Y,
+	       ZLayerCount,
+	       HeadingBucketCount
+	);
+}
+
+FText AFlightPathfinderActor::GetFailureReasonText(ERouteFailureReason Reason) const
+{
+	switch (Reason)
+	{
+	case ERouteFailureReason::None:
+		return FText::GetEmpty();
+
+	case ERouteFailureReason::InvalidStart:
+		return FText::FromString(TEXT("Der Startpunkt ist ungültig."));
+
+	case ERouteFailureReason::InvalidTarget:
+		return FText::FromString(TEXT("Der Zielpunkt ist ungültig."));
+
+	case ERouteFailureReason::InvalidTargetState:
+		return FText::FromString(
+			TEXT("Der Zielzustand ist ungültig oder kann nicht in das Suchraster übernommen werden."));
+
+	case ERouteFailureReason::InvalidFlightProfile:
+		return FText::FromString(TEXT("Kein gültiger Flugzeugtyp ausgewählt."));
+
+	case ERouteFailureReason::StartAltitudeTooLow:
+		return FText::FromString(TEXT("Die Starthöhe ist zu niedrig."));
+
+	case ERouteFailureReason::TargetAltitudeTooLow:
+		return FText::FromString(TEXT("Die Zielhöhe ist zu niedrig."));
+
+	case ERouteFailureReason::TargetAltitudeTooHigh:
+		return FText::FromString(TEXT("Die Zielhöhe liegt über der maximal erlaubten Flughöhe des Flugzeugs."));
+
+	case ERouteFailureReason::TargetAltitudeNotReachable:
+		return FText::FromString(TEXT("Die Zielflughöhe ist mit diesem Flugzeug nicht erreichbar."));
+
+	case ERouteFailureReason::TerrainCollision:
+	case ERouteFailureReason::TerrainClearance:
+		return FText::FromString(TEXT("Die Route unterschreitet die nötige Sicherheitsdistanz zum Terrain."));
+
+	case ERouteFailureReason::RestrictedAirspace:
+	case ERouteFailureReason::HardBlockZone:
+		return FText::FromString(TEXT("Die Route führt durch eine gesperrte oder blockierte Flugzone."));
+
+	case ERouteFailureReason::ClimbLimitExceeded:
+	case ERouteFailureReason::MaxClimbExceeded:
+		return FText::FromString(TEXT("Die notwendige Steigrate überschreitet das Flugzeuglimit."));
+
+	case ERouteFailureReason::DescentLimitExceeded:
+	case ERouteFailureReason::MaxDescentExceeded:
+		return FText::FromString(TEXT("Die notwendige Sinkrate überschreitet das Flugzeuglimit."));
+
+	case ERouteFailureReason::TurnRadiusExceeded:
+	case ERouteFailureReason::TurnRadiusTooSmall:
+		return FText::FromString(TEXT("Der benötigte Kurvenradius ist für dieses Flugzeug zu klein."));
+
+	case ERouteFailureReason::NoValidNeighbors:
+		return FText::FromString(
+			TEXT("Keine gültigen Nachbarpunkte gefunden. Die Route ist durch Terrain oder Fluglimits blockiert."));
+
+	case ERouteFailureReason::SearchLimitReached:
+	case ERouteFailureReason::MaxExpandedStatesReached:
+		return FText::FromString(TEXT("Keine Route gefunden. Das maximale Suchlimit wurde erreicht."));
+
+	case ERouteFailureReason::Unknown:
+	default:
+		return FText::FromString(TEXT("Die Route konnte nicht berechnet werden."));
+	}
+}
+
 // Check if state is inside search bounds
 bool AFlightPathfinderActor::IsStateInsideBounds(const FFlightPathState& State) const
 {
@@ -230,7 +412,8 @@ bool AFlightPathfinderActor::WorldToNearestValidState(const FVector& WorldPos, i
 	return false;
 }
 
-bool AFlightPathfinderActor::WorldToStateExact(const FVector& WorldPos, int32 HeadingIndex, FFlightPathState& OutState) const
+bool AFlightPathfinderActor::WorldToStateExact(const FVector& WorldPos, int32 HeadingIndex,
+                                               FFlightPathState& OutState) const
 {
 	if (!HeightCache || !HeightCache->IsValid() || ZLayerCount <= 0)
 	{
@@ -303,11 +486,13 @@ bool AFlightPathfinderActor::BuildPrimitiveSamplePoints(
 	float TotalDeltaZCm = 0.0f;
 	if (VerticalMode > 0)
 	{
-		TotalDeltaZCm = FlightProfile->MaxClimbRateMetersPerSecond * PrimitiveClimbRateFactor * TravelTimeSeconds * 100.0f;
+		TotalDeltaZCm = FlightProfile->MaxClimbRateMetersPerSecond * PrimitiveClimbRateFactor * TravelTimeSeconds *
+			100.0f;
 	}
 	else if (VerticalMode < 0)
 	{
-		TotalDeltaZCm = -FlightProfile->MaxDescentRateMetersPerSecond * PrimitiveClimbRateFactor * TravelTimeSeconds * 100.0f;
+		TotalDeltaZCm = -FlightProfile->MaxDescentRateMetersPerSecond * PrimitiveClimbRateFactor * TravelTimeSeconds *
+			100.0f;
 	}
 
 	FVector CurrentWorld = StartWorld;
@@ -659,7 +844,6 @@ bool AFlightPathfinderActor::DoesSegmentRespectTerrainClearance(const FVector& F
 }
 
 // Check if transition between two states respects flight rules
-// Check if transition between two states respects flight rules
 bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, const FFlightPathState& To) const
 {
 	if (!FlightProfile)
@@ -774,7 +958,7 @@ bool AFlightPathfinderActor::ApplyMotionPrimitive(
 	}
 
 	const FVector EndWorld = SamplePoints.Last();
-	
+
 	return WorldToNearestValidState(EndWorld, EndHeading, OutState);
 }
 
@@ -1167,38 +1351,48 @@ float AFlightPathfinderActor::CalculateTotalClimbMeters() const
 }
 
 // Run aircraft-aware A* route search
-void AFlightPathfinderActor::FindFlightRoute()
+bool AFlightPathfinderActor::RunFlightRouteSearch(
+	const FVector& StartWorldLocation,
+	const FVector& TargetWorldLocation,
+	UFlightProfile* InFlightProfile,
+	TArray<FVector>& OutRoutePoints
+)
 {
+	OutRoutePoints.Reset();
+
 	CurrentRouteWorldPoints.Reset();
 	TransitionValidityCache.Reset();
 	TransitionCostCache.Reset();
 	FailureStats.Reset();
-	LastFailureReason = ERouteFailureReason::None;
 
-	// Auto-link height cache from baker
+	LastFailureReason = ERouteFailureReason::None;
+	LastExpandedStates = 0;
+
+	// Use profile selected by UI or caller.
+	FlightProfile = InFlightProfile;
+
 	if (!HeightCache && GridBaker && GridBaker->HeightCache)
 	{
 		HeightCache = GridBaker->HeightCache;
 	}
 
-	if (!ValidateReferences())
+	if (!ValidateCoreReferences())
 	{
-		return;
+		LastFailureReason = ERouteFailureReason::Unknown;
+		return false;
 	}
+
+	BuildSearchSpaceForRoute(StartWorldLocation, TargetWorldLocation);
 
 	if (ZLayerCount <= 0)
 	{
-		BuildSearchSpace();
+		UE_LOG(LogTemp, Warning, TEXT("RunFlightRouteSearch abgebrochen: SearchSpace konnte nicht aufgebaut werden."));
+		LastFailureReason = ERouteFailureReason::Unknown;
+		return false;
 	}
 
-	if (ZLayerCount <= 0)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("FindFlightRoute abgebrochen: SearchSpace konnte nicht aufgebaut werden."));
-		return;
-	}
-
-	const FVector StartPos = StartActor->GetActorLocation();
-	const FVector GoalPos = GoalActor->GetActorLocation();
+	const FVector StartPos = StartWorldLocation;
+	const FVector GoalPos = TargetWorldLocation;
 
 	// Initial headings based on start-goal direction
 	const FVector2D StartToGoalXY(GoalPos.X - StartPos.X, GoalPos.Y - StartPos.Y);
@@ -1213,13 +1407,15 @@ void AFlightPathfinderActor::FindFlightRoute()
 	if (!WorldToNearestValidState(StartPos, StartHeading, StartState))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("FindFlightRoute abgebrochen: Kein gueltiger Startzustand gefunden."));
-		return;
+		LastFailureReason = ERouteFailureReason::InvalidStart;
+		return false;
 	}
 
 	if (!WorldToNearestValidState(GoalPos, GoalHeading, GoalState))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("FindFlightRoute abgebrochen: Kein gueltiger Zielzustand gefunden."));
-		return;
+		LastFailureReason = ERouteFailureReason::InvalidTarget;
+		return false;
 	}
 
 	// OpenHeap: priority queue for open states
@@ -1274,8 +1470,6 @@ void AFlightPathfinderActor::FindFlightRoute()
 		CurrentRecord->bClosed = true;
 
 		const float CurrentG = CurrentRecord->G;
-		const bool bCurrentHasParent = CurrentRecord->bHasParent;
-		const FFlightPathState CurrentParent = CurrentRecord->Parent;
 
 		// Optional debug for visited states
 		if (bDrawVisitedStates && GetWorld())
@@ -1345,6 +1539,8 @@ void AFlightPathfinderActor::FindFlightRoute()
 		}
 	}
 
+	LastExpandedStates = ExpandedCount;
+
 	if (!bFoundRoute)
 	{
 		if (ExpandedCount >= MaxExpandedStates)
@@ -1354,17 +1550,20 @@ void AFlightPathfinderActor::FindFlightRoute()
 
 		UE_LOG(LogTemp, Warning, TEXT("FindFlightRoute: Keine Route gefunden. ExpandedStates=%d"), ExpandedCount);
 
-		UE_LOG(LogTemp, Warning, TEXT("Failure Summary: Terrain=%d, HardZone=%d, Climb=%d, Descent=%d, TurnRadius=%d, InvalidTarget=%d, NoNeighbors=%d"),
-			FailureStats.TerrainClearanceCount,
-			FailureStats.HardBlockZoneCount,
-			FailureStats.MaxClimbExceededCount,
-			FailureStats.MaxDescentExceededCount,
-			FailureStats.TurnRadiusTooSmallCount,
-			FailureStats.InvalidTargetStateCount,
-			FailureStats.NoValidNeighborsCount
+		UE_LOG(LogTemp, Warning,
+		       TEXT(
+			       "Failure Summary: Terrain=%d, HardZone=%d, Climb=%d, Descent=%d, TurnRadius=%d, InvalidTarget=%d, NoNeighbors=%d"
+		       ),
+		       FailureStats.TerrainClearanceCount,
+		       FailureStats.HardBlockZoneCount,
+		       FailureStats.MaxClimbExceededCount,
+		       FailureStats.MaxDescentExceededCount,
+		       FailureStats.TurnRadiusTooSmallCount,
+		       FailureStats.InvalidTargetStateCount,
+		       FailureStats.NoValidNeighborsCount
 		);
 
-		return;
+		return false;
 	}
 
 	ReconstructRoute(Records, ReachedGoalState);
@@ -1389,6 +1588,137 @@ void AFlightPathfinderActor::FindFlightRoute()
 	if (bAutoDrawPathAfterSearch)
 	{
 		DebugDrawCurrentRoute();
+	}
+
+	OutRoutePoints = CurrentRouteWorldPoints;
+	return true;
+}
+
+FRouteCalculationResult AFlightPathfinderActor::CalculateFlightRouteForUI(
+	FVector StartWorldLocation,
+	FVector TargetWorldLocation,
+	float StartAltitudeMetersASL,
+	float TargetAltitudeMetersASL,
+	UFlightProfile* InFlightProfile
+)
+{
+	FRouteCalculationResult Result;
+
+	LastFailureReason = ERouteFailureReason::None;
+	LastExpandedStates = 0;
+
+	if (!InFlightProfile)
+	{
+		Result.bSuccess = false;
+		Result.FailureReason = ERouteFailureReason::InvalidFlightProfile;
+		Result.FailureText = GetFailureReasonText(Result.FailureReason);
+		return Result;
+	}
+
+	if (StartAltitudeMetersASL <= 0.0f)
+	{
+		Result.bSuccess = false;
+		Result.FailureReason = ERouteFailureReason::StartAltitudeTooLow;
+		Result.FailureText = GetFailureReasonText(Result.FailureReason);
+		return Result;
+	}
+
+	if (TargetAltitudeMetersASL <= 0.0f)
+	{
+		Result.bSuccess = false;
+		Result.FailureReason = ERouteFailureReason::TargetAltitudeTooLow;
+		Result.FailureText = GetFailureReasonText(Result.FailureReason);
+		return Result;
+	}
+
+	if (InFlightProfile->MaxAltitudeMetersASL > 0.0f &&
+		TargetAltitudeMetersASL > InFlightProfile->MaxAltitudeMetersASL)
+	{
+		Result.bSuccess = false;
+		Result.FailureReason = ERouteFailureReason::TargetAltitudeTooHigh;
+		Result.FailureText = GetFailureReasonText(Result.FailureReason);
+		return Result;
+	}
+
+	// IMPORTANT:
+	// UI values are meters above sea level.
+	// Unreal world Z is centimeters.
+	if (!HeightCache)
+	{
+		if (GridBaker && GridBaker->HeightCache)
+		{
+			HeightCache = GridBaker->HeightCache;
+		}
+	}
+
+	if (!HeightCache)
+	{
+		Result.bSuccess = false;
+		Result.FailureReason = ERouteFailureReason::Unknown;
+		Result.FailureText = FText::FromString(TEXT("HeightCache fehlt."));
+		return Result;
+	}
+
+	StartWorldLocation.Z = HeightCache->SeaLevelWorldZCm + (StartAltitudeMetersASL * 100.0f);
+	TargetWorldLocation.Z = HeightCache->SeaLevelWorldZCm + (TargetAltitudeMetersASL * 100.0f);
+
+	TArray<FVector> FoundRoute;
+
+	const bool bSuccess = RunFlightRouteSearch(
+		StartWorldLocation,
+		TargetWorldLocation,
+		InFlightProfile,
+		FoundRoute
+	);
+
+	Result.bSuccess = bSuccess;
+	Result.RoutePoints = FoundRoute;
+	Result.ExpandedStates = LastExpandedStates;
+
+	if (!bSuccess)
+	{
+		Result.RoutePoints.Empty();
+
+		Result.FailureReason = LastFailureReason;
+
+		if (Result.FailureReason == ERouteFailureReason::None)
+		{
+			Result.FailureReason = ERouteFailureReason::Unknown;
+		}
+
+		Result.FailureText = GetFailureReasonText(Result.FailureReason);
+		return Result;
+	}
+
+	Result.FailureReason = ERouteFailureReason::None;
+	Result.FailureText = FText::GetEmpty();
+
+	return Result;
+}
+
+void AFlightPathfinderActor::FindFlightRoute()
+{
+	if (!StartActor || !GoalActor)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FindFlightRoute: StartActor oder GoalActor fehlt."));
+		LastFailureReason = ERouteFailureReason::InvalidStart;
+		return;
+	}
+
+	TArray<FVector> FoundRoute;
+
+	const bool bSuccess = RunFlightRouteSearch(
+		StartActor->GetActorLocation(),
+		GoalActor->GetActorLocation(),
+		FlightProfile,
+		FoundRoute
+	);
+
+	if (!bSuccess)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FindFlightRoute: Route konnte nicht berechnet werden. Grund: %s"),
+		       *GetFailureReasonText(LastFailureReason).ToString()
+		);
 	}
 }
 
