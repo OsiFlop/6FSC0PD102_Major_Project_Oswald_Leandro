@@ -92,3 +92,51 @@ void ARoutePlannerManager::ClearCurrentRoute()
 	CurrentRoutePoints.Empty();
 	LastResult = FRouteCalculationResult();
 }
+
+void ARoutePlannerManager::SetStartMarkerWorldXY(FVector2D WorldXY)
+{
+	if (!StartMarker)
+	{
+		return;
+	}
+
+	FVector NewLocation = StartMarker->GetActorLocation();
+	NewLocation.X = WorldXY.X;
+	NewLocation.Y = WorldXY.Y;
+
+	StartMarker->SetActorLocation(NewLocation);
+}
+
+void ARoutePlannerManager::SetTargetMarkerWorldXY(FVector2D WorldXY)
+{
+	if (!TargetMarker)
+	{
+		return;
+	}
+
+	FVector NewLocation = TargetMarker->GetActorLocation();
+	NewLocation.X = WorldXY.X;
+	NewLocation.Y = WorldXY.Y;
+
+	TargetMarker->SetActorLocation(NewLocation);
+}
+
+FVector ARoutePlannerManager::GetStartMarkerLocation() const
+{
+	if (!StartMarker)
+	{
+		return FVector::ZeroVector;
+	}
+
+	return StartMarker->GetActorLocation();
+}
+
+FVector ARoutePlannerManager::GetTargetMarkerLocation() const
+{
+	if (!TargetMarker)
+	{
+		return FVector::ZeroVector;
+	}
+
+	return TargetMarker->GetActorLocation();
+}

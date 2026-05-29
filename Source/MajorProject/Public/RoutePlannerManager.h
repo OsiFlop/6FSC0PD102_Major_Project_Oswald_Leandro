@@ -31,6 +31,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Route Planner|References")
 	TObjectPtr<AActor> TargetMarker;
 
+	// World-space minimum corner shown by the route map.
+	// X/Y only. Usually matches the terrain or height cache bounds.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Route Planner|Map")
+	FVector2D MapWorldMin = FVector2D(-50000.0f, -50000.0f);
+
+	// World-space maximum corner shown by the route map.
+	// X/Y only. Usually matches the terrain or height cache bounds.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Route Planner|Map")
+	FVector2D MapWorldMax = FVector2D(50000.0f, 50000.0f);
+
 	UPROPERTY(BlueprintReadOnly, Category = "Route Planner|Result")
 	TArray<FVector> CurrentRoutePoints;
 
@@ -57,4 +67,16 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Route Planner")
 	void ClearCurrentRoute();
+
+	UFUNCTION(BlueprintCallable, Category = "Route Planner|Map")
+	void SetStartMarkerWorldXY(FVector2D WorldXY);
+
+	UFUNCTION(BlueprintCallable, Category = "Route Planner|Map")
+	void SetTargetMarkerWorldXY(FVector2D WorldXY);
+
+	UFUNCTION(BlueprintCallable, Category = "Route Planner|Map")
+	FVector GetStartMarkerLocation() const;
+
+	UFUNCTION(BlueprintCallable, Category = "Route Planner|Map")
+	FVector GetTargetMarkerLocation() const;
 };
