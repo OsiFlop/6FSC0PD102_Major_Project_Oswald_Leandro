@@ -21,11 +21,11 @@ public:
 	AHeightQueryProbeActor();
 
 	// Reference to built voxel grid
-	UPROPERTY(EditAnywhere, Category="References")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="References")
 	TObjectPtr<AVoxelGridBaker> GridBaker;
 
 	// Reference to baked height cache
-	UPROPERTY(EditAnywhere, Category="References")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="References")
 	TObjectPtr<UVoxelHeightCache> HeightCache;
 
 	// Query max height at actor world location
@@ -33,12 +33,19 @@ public:
 	void QueryHeightAtMyLocation();
 
 	// Enable debug marker visualization
-	UPROPERTY(EditAnywhere, Category="Debug")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
 	bool bDrawMarker = true;
 
 	// Debug marker lifetime (seconds)
-	UPROPERTY(EditAnywhere, Category="Debug")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
 	float MarkerLifeTime = 5.0f;
+
+	UFUNCTION(BlueprintCallable, Category = "Terrain Height Query")
+	bool QueryHeightAtWorldXY(
+		const FVector& WorldPos,
+		float& OutHeightASLm,
+		float& OutWorldZCm
+	) const;
 
 private:
 	// Convert world XY position into grid cell indices

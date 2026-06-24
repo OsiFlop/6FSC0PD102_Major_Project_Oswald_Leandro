@@ -43,6 +43,80 @@ bool AHeightQueryProbeActor::WorldXYToCell(const FVector& WorldPos, int32& OutX,
 	return true;
 }
 
+bool AHeightQueryProbeActor::QueryHeightAtWorldXY(
+	const FVector& WorldPos,
+	float& OutHeightASLm,
+	float& OutWorldZCm
+) const
+{
+	OutHeightASLm = 0.0f;
+	OutWorldZCm = 0.0f;
+
+	if (!GridBaker || !HeightCache)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("QueryHeightAtWorldXY failed: missing GridBaker or HeightCache ref"));
+		return false;
+	}
+
+	if (!HeightCache->IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("QueryHeightAtWorldXY failed: HeightCache invalid. Bake first."));
+		return false;
+	}
+
+	int32 X = 0;
+	int32 Y = 0;
+
+	if (!WorldXYToCell(WorldPos, X, Y))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("QueryHeightAtWorldXY failed: position not inside grid. World=%s"), *WorldPos.ToString());
+		return false;
+	}
+
+	const int32 Idx = HeightCache->ToIndex(X, Y);
+	const float MaxZcm = HeightCache->MaxHeightCm[Idx];
+
+	const float SeaLevelCm = HeightCache->SeaLevelWorldZCm;
+	const float HeightASLm = (MaxZcm - SeaLevelCm) / 100.0f;
+
+	OutWorldZCm = MaxZcm;
+	OutHeightASLm = HeightASLm;
+
+	UE_LOG(LogTemp, Display,
+		TEXT("QueryHeightAtWorldXY @ WorldXY(%.1f, %.1f) -> Cell(%d,%d) -> WorldZ=%.1f cm, ASL=%.2f m"),
+		WorldPos.X, WorldPos.Y, X, Y, MaxZcm, HeightASLm
+	);
+
+	if (bDrawMarker && GetWorld())
+	{
+		const FVector MarkerLoc(WorldPos.X, WorldPos.Y, MaxZcm);
+
+		DrawDebugSphere(
+			GetWorld(),
+			MarkerLoc,
+			200.0f,
+			12,
+			FColor::Yellow,
+			false,
+			MarkerLifeTime,
+			0,
+			4.0f
+		);
+
+		DrawDebugString(
+			GetWorld(),
+			MarkerLoc + FVector(0.0f, 0.0f, 250.0f),
+			FString::Printf(TEXT("Cell(%d,%d)\nASL=%.2fm"), X, Y, HeightASLm),
+			nullptr,
+			FColor::White,
+			MarkerLifeTime,
+			false
+		);
+	}
+
+	return true;
+}
+
 // Query maximum terrain height at current actor location
 void AHeightQueryProbeActor::QueryHeightAtMyLocation()
 {
