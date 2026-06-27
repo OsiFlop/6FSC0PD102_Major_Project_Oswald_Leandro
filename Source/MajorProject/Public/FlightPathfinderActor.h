@@ -270,7 +270,34 @@ public:
 	int32 ZLayerCount = 0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="1.0"))
-	float HeuristicWeight = 1.2f;
+	float HeuristicWeight = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="10000"))
+	int32 SearchMaxExpandedStates = 1500000;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="0.0"))
+	float GoalConnectionToleranceMeters = 900.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="0.0"))
+	float DirectRoutePreferredClearanceMaxLengthMeters = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Safety", meta=(ClampMin="0.0"))
+	float MinimumAbsoluteTerrainClearanceMeters = 50.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Safety", meta=(ClampMin="1.0"))
+	float TerrainClearanceSafetyMultiplier = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Safety", meta=(ClampMin="0.0"))
+	float LateralTerrainSafetyRadiusMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Safety", meta=(ClampMin="0.0"))
+	float PreferredClearanceSpeedLookaheadSeconds = 6.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Result", meta=(ClampMin="0.0"))
+	float MinOutputWaypointSpacingMeters = 750.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Result", meta=(ClampMin="2", ClampMax="64"))
+	int32 MaxOutputWaypointCompactionLookahead = 16;
 
 	// CurrentRouteWorldPoints: final route as world-space positions
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Result")
@@ -302,7 +329,10 @@ public:
 	int32 PrimitiveSamplesPerSegment = 8;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="0.1", ClampMax="1.0"))
-	float PrimitiveClimbRateFactor = 0.5f;
+	float PrimitiveClimbRateFactor = 0.85f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="100.0"))
+	float MaxAutoPrimitiveSegmentLengthMeters = 2500.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="1", ClampMax="4"))
 	int32 PrimitiveTurnDeltaBuckets = 1;
@@ -389,11 +419,52 @@ protected:
 	// Get terrain height from world X / Y position
 	bool GetTerrainHeightCmAtWorldXY(float WorldX, float WorldY, float& OutTerrainHeightCm) const;
 
+	bool GetConservativeTerrainHeightCmAtWorldXY(
+		float WorldX,
+		float WorldY,
+		float HorizontalSafetyRadiusMeters,
+		float& OutTerrainHeightCm
+	) const;
+
 	// Convert Unreal world Z to altitude in meters ASL
 	float GetAltitudeMetersASLFromWorldZ(float WorldZCm) const;
 
 	// Get terrain height at cell in meters ASL
 	float GetTerrainHeightMetersASLAtCell(int32 X, int32 Y) const;
+
+	float GetRequiredTerrainClearanceMeters() const;
+	float GetPreferredTerrainClearanceMeters() const;
+	float GetTerrainSafetyRadiusMeters() const;
+	float GetPreferredTerrainSafetyRadiusMeters() const;
+	float GetEffectivePrimitiveSegmentLengthMeters() const;
+	float GetMaxAllowedWorldZCm() const;
+	bool DoesPointRespectAltitudeLimit(const FVector& WorldPoint) const;
+	bool DoesRouteRespectAltitudeLimit(const TArray<FVector>& RoutePoints) const;
+	bool DoesSegmentRespectAltitudeLimit(const FVector& FromWorld, const FVector& ToWorld) const;
+	bool DoesPointRespectTerrainClearance(const FVector& WorldPoint) const;
+	bool DoesPointRespectPreferredTerrainClearance(const FVector& WorldPoint) const;
+	bool DoesSegmentRespectPreferredTerrainClearance(const FVector& FromWorld, const FVector& ToWorld) const;
+	bool DoesDirectSegmentRespectFlightRules(
+		const FVector& FromWorld,
+		const FVector& ToWorld,
+		int32 FromHeadingIndex,
+		int32 ToHeadingIndex
+	) const;
+	bool TryBuildDirectVfrRoute(
+		const FVector& StartWorldLocation,
+		const FVector& TargetWorldLocation,
+		int32 StartHeadingIndex,
+		TArray<FVector>& OutRoutePoints
+	);
+	bool CanConnectToGoal(
+		const FFlightPathState& Current,
+		const FFlightPathState& Goal,
+		const FVector& GoalWorldLocation,
+		int32 GoalHeadingIndex
+	) const;
+	bool DoesRouteRespectTurnRadius(const TArray<FVector>& RoutePoints) const;
+	bool ValidateCurrentRouteSafety() const;
+	void CompactCurrentRouteWaypoints();
 
 	// Check if state is flyable and safe
 	bool IsStateValid(const FFlightPathState& State) const;
@@ -458,6 +529,7 @@ protected:
 
 	mutable TMap<FFlightTransitionKey, bool> TransitionValidityCache;
 	mutable TMap<FFlightTransitionKey, float> TransitionCostCache;
+	mutable TMap<FIntVector, float> ConservativeTerrainHeightCache;
 
 	float CalculateTurnReversalPenalty(
 	const FFlightPathState& GrandParent,

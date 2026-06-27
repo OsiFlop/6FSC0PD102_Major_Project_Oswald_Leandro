@@ -11,6 +11,29 @@ ARoutePlannerManager::ARoutePlannerManager()
 void ARoutePlannerManager::SetSelectedFlightProfile(UFlightProfile* NewProfile)
 {
 	SelectedFlightProfile = NewProfile;
+	CurrentRoutePoints.Empty();
+	LastResult = FRouteCalculationResult();
+
+	if (PathfinderActor)
+	{
+		PathfinderActor->FlightProfile = NewProfile;
+		PathfinderActor->ClearCurrentRoute();
+	}
+
+	if (NewProfile)
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("RoutePlanner: Flugzeugprofil gewechselt: %s | Asset=%s | MaxAlt=%.1fm | Clearance=%.1fm | Speed=%.1fm/s | Climb=%.1fm/s | Descent=%.1fm/s | TurnRadius=%.1fm"),
+			*NewProfile->AircraftName,
+			*NewProfile->GetPathName(),
+			NewProfile->MaxAltitudeMetersASL,
+			NewProfile->MinimumTerrainClearanceMeters,
+			NewProfile->CruiseSpeedMetersPerSecond,
+			NewProfile->MaxClimbRateMetersPerSecond,
+			NewProfile->MaxDescentRateMetersPerSecond,
+			NewProfile->MinimumTurnRadiusMeters
+		);
+	}
 }
 
 UFlightProfile* ARoutePlannerManager::GetSelectedFlightProfile() const
@@ -24,6 +47,13 @@ FRouteCalculationResult ARoutePlannerManager::CalculateRouteFromMarkers(
 )
 {
 	FRouteCalculationResult Result;
+	CurrentRoutePoints.Empty();
+	LastResult = Result;
+
+	if (PathfinderActor)
+	{
+		PathfinderActor->ClearCurrentRoute();
+	}
 
 	if (!PathfinderActor)
 	{
@@ -55,22 +85,48 @@ FRouteCalculationResult ARoutePlannerManager::CalculateRouteFromMarkers(
 		return Result;
 	}
 
-	if (!SelectedFlightProfile)
+	UFlightProfile* ProfileToUse = SelectedFlightProfile;
+	if (!ProfileToUse && PathfinderActor->FlightProfile)
+	{
+		ProfileToUse = PathfinderActor->FlightProfile;
+	}
+
+	if (!ProfileToUse && AvailableFlightProfiles.Num() > 0)
+	{
+		ProfileToUse = AvailableFlightProfiles[0];
+	}
+
+	if (!ProfileToUse)
 	{
 		Result.bSuccess = false;
 		Result.FailureReason = ERouteFailureReason::InvalidFlightProfile;
-		Result.FailureText = FText::FromString(TEXT("Kein Flugzeugtyp ausgewählt."));
+		Result.FailureText = FText::FromString(TEXT("Kein Flugzeugtyp ausgewaehlt."));
 		LastResult = Result;
 		CurrentRoutePoints.Empty();
 		return Result;
 	}
+
+	SelectedFlightProfile = ProfileToUse;
+	PathfinderActor->FlightProfile = ProfileToUse;
+
+	UE_LOG(LogTemp, Display,
+		TEXT("RoutePlanner: Berechne Route mit Profil: %s | Asset=%s | MaxAlt=%.1fm | Clearance=%.1fm | Speed=%.1fm/s | Climb=%.1fm/s | Descent=%.1fm/s | TurnRadius=%.1fm"),
+		*ProfileToUse->AircraftName,
+		*ProfileToUse->GetPathName(),
+		ProfileToUse->MaxAltitudeMetersASL,
+		ProfileToUse->MinimumTerrainClearanceMeters,
+		ProfileToUse->CruiseSpeedMetersPerSecond,
+		ProfileToUse->MaxClimbRateMetersPerSecond,
+		ProfileToUse->MaxDescentRateMetersPerSecond,
+		ProfileToUse->MinimumTurnRadiusMeters
+	);
 
 	Result = PathfinderActor->CalculateFlightRouteForUI(
 		StartMarker->GetActorLocation(),
 		TargetMarker->GetActorLocation(),
 		StartAltitudeMetersASL,
 		TargetAltitudeMetersASL,
-		SelectedFlightProfile
+		ProfileToUse
 	);
 
 	LastResult = Result;

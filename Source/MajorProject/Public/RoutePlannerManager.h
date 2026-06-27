@@ -19,7 +19,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Route Planner|Aircraft")
 	TArray<TObjectPtr<UFlightProfile>> AvailableFlightProfiles;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Route Planner|Aircraft")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Route Planner|Aircraft")
 	TObjectPtr<UFlightProfile> SelectedFlightProfile;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Route Planner|References")
