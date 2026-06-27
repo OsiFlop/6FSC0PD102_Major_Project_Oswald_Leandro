@@ -1,4 +1,5 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+// MajorProject module header
+// Shared include point for the Unreal game module
 
 #pragma once
 

@@ -1,6 +1,8 @@
 // Flight influence zone actor
-// Defines 3D zones for route restrictions or extra traversal cost
-// Used by pathfinding to avoid or penalize specific airspace areas
+// Defines 3D influence zones for flight route search
+// Can work as hard block or soft cost zone
+// Uses box volume plus optional altitude limits
+// Used by pathfinding to avoid or penalize airspace areas
 
 #pragma once
 
@@ -23,6 +25,7 @@ public:
 	TObjectPtr<UBoxComponent> ZoneBox;
 
 	// bHardBlock: true = route cannot pass through this zone
+	// false = soft zone with extra route cost
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Zone")
 	bool bHardBlock = true;
 
@@ -30,7 +33,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Zone", meta=(ClampMin="0.0"))
 	float AdditionalTraversalCost = 0.0f;
 
-	// MinAltitudeMetersASL: lower altitude limit for active zone
+	// MinAltitudeMetersASL: lower altitude limit for active zone, point below this value ignores the zone
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Zone")
 	float MinAltitudeMetersASL = 0.0f;
 
@@ -38,10 +41,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Zone")
 	float MaxAltitudeMetersASL = -1.0f;
 
-	// Check if point is inside zone bounds and altitude range
+	// Check if point is inside box and altitude range
 	bool ContainsPoint(const FVector& WorldPoint, float PointAltitudeMetersASL) const;
 
-	// Check if segment crosses zone, sampled step by step
+	// Check if route segment crosses this zone, samples along the segment with fixed step distance
 	bool IntersectsSegmentBySampling(
 		const FVector& From,
 		const FVector& To,

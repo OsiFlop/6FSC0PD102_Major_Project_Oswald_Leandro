@@ -1,3 +1,7 @@
+// Route calculation result
+// Stores success state, route points, failure reason, and debug stats
+// Returned from route planning calls to the UI
+
 #pragma once
 
 #include "CoreMinimal.h"

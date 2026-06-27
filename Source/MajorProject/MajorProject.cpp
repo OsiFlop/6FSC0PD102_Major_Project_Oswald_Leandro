@@ -1,4 +1,5 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+// MajorProject game module
+// Registers the primary Unreal module for the project
 
 #include "MajorProject.h"
 #include "Modules/ModuleManager.h"

@@ -1,3 +1,7 @@
+// Route failure reason enum
+// Lists route planning failure states shared by pathfinder and UI
+// Used to provide consistent user-facing error feedback
+
 #pragma once
 
 #include "CoreMinimal.h"

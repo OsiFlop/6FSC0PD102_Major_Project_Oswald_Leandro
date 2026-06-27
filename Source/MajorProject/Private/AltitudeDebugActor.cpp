@@ -1,56 +1,67 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
+// Altitude debug actor
+// Converts world Z values into meters above sea level
+// Uses height cache sea level as reference
+// Logs start altitude, goal altitude and altitude difference
+// Manual editor debug helper for route setup checks
 
 #include "AltitudeDebugActor.h"
 #include "Navigation/Grid/VoxelHeightCache.h"
 
-// Sets default values
+// Disable ticking because altitude debug output is triggered manually
 AAltitudeDebugActor::AAltitudeDebugActor()
 {
- 	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
+	// No runtime tick needed
 	PrimaryActorTick.bCanEverTick = false;
-
 }
 
+// Check required references before altitude calculation
 bool AAltitudeDebugActor::ValidateReferences() const
 {
 	if (!HeightCache)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("AltitudeDebug: HeightCache fehlt."));
+		// Missing sea level reference
+		UE_LOG(LogTemp, Warning, TEXT("AltitudeDebug: HeightCache is missing."));
 		return false;
 	}
 
 	if (!HeightCache->IsValid())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("AltitudeDebug: HeightCache ist ungueltig."));
+		// Height cache not baked or invalid
+		UE_LOG(LogTemp, Warning, TEXT("AltitudeDebug: HeightCache is invalid."));
 		return false;
 	}
 
 	if (!StartActor)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("AltitudeDebug: StartActor fehlt."));
+		// Missing start altitude source
+		UE_LOG(LogTemp, Warning, TEXT("AltitudeDebug: StartActor is missing."));
 		return false;
 	}
 
 	if (!GoalActor)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("AltitudeDebug: GoalActor fehlt."));
+		// Missing goal altitude source
+		UE_LOG(LogTemp, Warning, TEXT("AltitudeDebug: GoalActor is missing."));
 		return false;
 	}
 
 	return true;
 }
 
+// Convert Unreal world Z in centimeters to meters ASL
 float AAltitudeDebugActor::GetAltitudeMetersASLFromWorldZ(float WorldZCm) const
 {
 	if (!HeightCache)
 	{
+		// Safe fallback, no sea level data
 		return 0.0f;
 	}
 
+	// ASL = world height minus sea level, converted cm to m
 	return (WorldZCm - HeightCache->SeaLevelWorldZCm) / 100.0f;
 }
 
+// Print start / goal altitude values and difference
 void AAltitudeDebugActor::PrintStartAndGoalASL()
 {
 	if (!ValidateReferences())
@@ -58,10 +69,16 @@ void AAltitudeDebugActor::PrintStartAndGoalASL()
 		return;
 	}
 
+	// StartASL: start actor height above sea level
 	const float StartASL = GetAltitudeMetersASLFromWorldZ(StartActor->GetActorLocation().Z);
+
+	// GoalASL: goal actor height above sea level
 	const float GoalASL = GetAltitudeMetersASLFromWorldZ(GoalActor->GetActorLocation().Z);
 
+	// Debug log: values for ASL conversion check
 	UE_LOG(LogTemp, Display, TEXT("Start ASL: %.2f m"), StartASL);
 	UE_LOG(LogTemp, Display, TEXT("Goal ASL: %.2f m"), GoalASL);
+
+	// Delta ASL: climb/descent difference from start to goal
 	UE_LOG(LogTemp, Display, TEXT("Delta ASL: %.2f m"), GoalASL - StartASL);
 }

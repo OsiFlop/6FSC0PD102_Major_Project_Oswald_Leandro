@@ -3,6 +3,7 @@
 // Uses terrain height cache, flight profile and influence zones
 // Search state = voxel position plus heading direction
 // Validates terrain clearance, climb / descent limits, turn radius and blocked zones
+// Supports direct VFR route, motion primitives, caching and UI result output
 // Outputs route points and debug drawing
 
 #include "FlightPathfinderActor.h"
@@ -16,6 +17,7 @@
 
 AFlightPathfinderActor::AFlightPathfinderActor()
 {
+	// No runtime tick needed
 	PrimaryActorTick.bCanEverTick = false;
 }
 
@@ -24,86 +26,98 @@ bool AFlightPathfinderActor::ValidateReferences() const
 {
 	if (!GridBaker)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: GridBaker fehlt."));
+		// Missing terrain grid source
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: GridBaker is missing."));
 		return false;
 	}
 
 	if (!HeightCache)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeightCache fehlt."));
+		// Missing baked terrain height data
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeightCache is missing."));
 		return false;
 	}
 
 	if (!HeightCache->IsValid())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeightCache ist ungueltig."));
+		// Height cache not baked or invalid
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeightCache is invalid."));
 		return false;
 	}
 
 	if (!FlightProfile)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: FlightProfile fehlt."));
+		// Missing aircraft profile
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: FlightProfile is missing."));
 		return false;
 	}
 
 	if (!StartActor || !GoalActor)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: StartActor oder GoalActor fehlt."));
+		// Missing actor route endpoints
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: StartActor or GoalActor is missing."));
 		return false;
 	}
-
-	// CruiseSpeedMetersPerSecond: required for climb / descent timing
+	
 	if (FlightProfile->CruiseSpeedMetersPerSecond <= 0.0f)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: CruiseSpeedMetersPerSecond muss > 0 sein."));
+		// Speed needed for travel time
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: CruiseSpeedMetersPerSecond must be > 0."));
 		return false;
 	}
-
-	// HeadingBucketCount: minimum needed for usable direction steps
+	
 	if (HeadingBucketCount < 4)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeadingBucketCount muss >= 4 sein."));
+		// Too few heading directions
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeadingBucketCount must be >= 4."));
 		return false;
 	}
 
 	return true;
 }
 
+// Check core references for UI and internal route search
 bool AFlightPathfinderActor::ValidateCoreReferences() const
 {
 	if (!GridBaker)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: GridBaker fehlt."));
+		// Missing terrain grid source
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: GridBaker is missing."));
 		return false;
 	}
 
 	if (!HeightCache)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeightCache fehlt."));
+		// Missing baked terrain height data
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeightCache is missing."));
 		return false;
 	}
 
 	if (!HeightCache->IsValid())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeightCache ist ungueltig."));
+		// Height cache not baked or invalid
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeightCache is invalid."));
 		return false;
 	}
 
 	if (!FlightProfile)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: FlightProfile fehlt."));
+		// Missing aircraft profile
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: FlightProfile is missing."));
 		return false;
 	}
 
 	if (FlightProfile->CruiseSpeedMetersPerSecond <= 0.0f)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: CruiseSpeedMetersPerSecond muss > 0 sein."));
+		// Speed needed for travel time
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: CruiseSpeedMetersPerSecond must be > 0."));
 		return false;
 	}
 
 	if (HeadingBucketCount < 4)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeadingBucketCount muss >= 4 sein."));
+		// Too few heading directions
+		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: HeadingBucketCount must be >= 4."));
 		return false;
 	}
 
@@ -113,6 +127,7 @@ bool AFlightPathfinderActor::ValidateCoreReferences() const
 // Build 3D search space from terrain height range
 void AFlightPathfinderActor::BuildSearchSpace()
 {
+	// Reset layers before rebuild
 	ZLayerCount = 0;
 
 	// Auto-link height cache from baker
@@ -183,7 +198,7 @@ void AFlightPathfinderActor::BuildSearchSpace()
 	SearchMaxWorld.Y = HeightCache->GridMinWorld.Y + (HeightCache->GridSize.Y * HeightCache->CellSizeCm);
 	SearchMaxWorld.Z = MaxRelevantZ + (ExtraTopLayers * VoxelSizeZCm);
 
-	// Harte Obergrenze des Suchraums anhand des Flugzeugprofils
+	// Clamp search space to the aircraft altitude ceiling
 	if (FlightProfile && FlightProfile->MaxAltitudeMetersASL > 0.0f)
 	{
 		const float MaxAllowedWorldZ = HeightCache->SeaLevelWorldZCm + (FlightProfile->MaxAltitudeMetersASL * 100.0f);
@@ -259,7 +274,7 @@ void AFlightPathfinderActor::BuildSearchSpaceForRoute(
 	float MinRelevantZ = MinTerrainZ;
 	float MaxRelevantZ = MaxTerrainZ;
 
-	// Wichtig: Hier werden Start- und Zielhöhe aus dem UI berücksichtigt.
+	// Include UI-provided start and target altitudes in the search space
 	MinRelevantZ = FMath::Min(MinRelevantZ, StartWorldLocation.Z);
 	MaxRelevantZ = FMath::Max(MaxRelevantZ, StartWorldLocation.Z);
 
@@ -274,7 +289,7 @@ void AFlightPathfinderActor::BuildSearchSpaceForRoute(
 	SearchMaxWorld.Y = HeightCache->GridMinWorld.Y + (HeightCache->GridSize.Y * HeightCache->CellSizeCm);
 	SearchMaxWorld.Z = MaxRelevantZ + (ExtraTopLayers * VoxelSizeZCm);
 
-	// Harte Obergrenze des Suchraums anhand des Flugzeugprofils
+	// Clamp search space to the aircraft altitude ceiling
 	if (FlightProfile && FlightProfile->MaxAltitudeMetersASL > 0.0f)
 	{
 		const float MaxAllowedWorldZ = HeightCache->SeaLevelWorldZCm + (FlightProfile->MaxAltitudeMetersASL * 100.0f);
@@ -1826,10 +1841,10 @@ float AFlightPathfinderActor::HeuristicCost(const FFlightPathState& A, const FFl
 		return StraightLineDistanceMeters;
 	}
 
-	// Basisheuristik: direkte Flugzeit
+	// Base heuristic: direct flight time
 	float Cost = StraightLineDistanceMeters / FlightProfile->CruiseSpeedMetersPerSecond;
 
-	// Extraheuristik fuer noetigen Steigflug
+	// Extra heuristic cost for required climb
 	const float DeltaZMeters = FMath::Max(0.0f, (BWorld.Z - AWorld.Z) / 100.0f);
 	if (DeltaZMeters > 0.0f)
 	{
@@ -1856,7 +1871,7 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 		return PathLengthMeters;
 	}
 
-	// Basis: Flugzeit statt Zentimeterdistanz
+	// Base cost: flight time instead of centimeter distance
 	float Cost = PathLengthMeters / FlightProfile->CruiseSpeedMetersPerSecond;
 
 	const float FromAltitudeMetersASL = GetAltitudeMetersASLFromWorldZ(FromWorld.Z);
@@ -1865,7 +1880,7 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 	// Soft influence zones
 	Cost += GetSoftZoneTraversalCost(FromWorld, ToWorld, FromAltitudeMetersASL, ToAltitudeMetersASL);
 
-	// Steigpenalty: schwache Flugzeuge sollen sichtbar früher / weiter ausholen
+	// Climb penalty: weaker aircraft need earlier or wider climb planning
 	const float DeltaZMeters = (ToWorld.Z - FromWorld.Z) / 100.0f;
 	if (DeltaZMeters > 0.0f)
 	{
@@ -1874,7 +1889,7 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 		Cost += ClimbPenalty;
 	}
 
-	// Sinkpenalty: moderat
+	// Descent penalty: keep descent changes moderate
 	if (DeltaZMeters < 0.0f)
 	{
 		const float DescentPenalty =
@@ -1882,7 +1897,7 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 		Cost += DescentPenalty;
 	}
 
-	// Turnpenalty: grosse Kurvenradien sollen die Route sichtbar beeinflussen
+	// Turn penalty: larger turn radii should influence route choice
 	const int32 HeadingDeltaBuckets = GetSmallestHeadingDelta(From.HeadingIndex, To.HeadingIndex);
 	if (HeadingDeltaBuckets > 0)
 	{
@@ -1893,8 +1908,8 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 		Cost += TurnPenalty;
 	}
 
-	// Sicherheitsorientierte Terrainnähe-Penalty:
-	// nicht nur "gerade noch legal", sondern sichtbar konservativ
+	// Terrain proximity penalty: prefer safer clearance where possible
+	// Avoid routes that are only barely legal when safer options exist
 	float LowestClearanceMeters = TNumericLimits<float>::Max();
 	const int32 NumSamples = 12;
 
@@ -1936,7 +1951,7 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 		}
 	}
 
-	// Kleine Zusatzpenalty fuer sehr kurze horizontale Segmente, damit unruhiges Zickzack unattraktiver wird
+	// Small extra penalty for very short horizontal segments to reduce jitter
 	if (HorizontalDistanceMeters < GetEffectivePrimitiveSegmentLengthMeters() * 0.5f)
 	{
 		Cost += 10.0f;
@@ -1995,13 +2010,13 @@ float AFlightPathfinderActor::CalculateTurnReversalPenalty(
 		SignedNextTurn -= HeadingBucketCount;
 	}
 
-	// Kein echter Richtungswechsel oder ein Segment ist gerade
+	// No real direction change or one segment is straight
 	if (SignedPrevTurn == 0 || SignedNextTurn == 0)
 	{
 		return 0.0f;
 	}
 
-	// Wechsel von links nach rechts oder rechts nach links bestrafen
+	// Penalize immediate left-right or right-left turn reversals
 	const bool bTurnDirectionChanged =
 		(SignedPrevTurn > 0 && SignedNextTurn < 0) ||
 		(SignedPrevTurn < 0 && SignedNextTurn > 0);
@@ -2011,7 +2026,7 @@ float AFlightPathfinderActor::CalculateTurnReversalPenalty(
 		return 0.0f;
 	}
 
-	// Stärke der Strafe
+	// Reversal penalty strength
 	return 2000.0f;
 }
 
@@ -2032,13 +2047,13 @@ bool AFlightPathfinderActor::PopBestOpenStateFromHeap(
 			continue;
 		}
 
-		// Veraltete Heap-Einträge ignorieren
+		// Ignore stale heap entries
 		if (Record->bClosed)
 		{
 			continue;
 		}
 
-		// Nur aktuellster F-Wert ist gültig
+		// Only the latest F score is valid
 		if (!FMath::IsNearlyEqual(Record->F, BestEntry.FScore, KINDA_SMALL_NUMBER))
 		{
 			continue;
@@ -2080,7 +2095,7 @@ void AFlightPathfinderActor::ReconstructRoute(
 		return;
 	}
 
-	// Nur die A*-Stuetzzustaende ausgeben. Primitive-Samples bleiben intern fuer Sicherheitschecks.
+	// Output only A* support states. Primitive samples stay internal for safety checks.
 	CurrentRouteWorldPoints.Add(StateToWorldCenter(StatePath[0]));
 	for (int32 i = 1; i < StatePath.Num(); ++i)
 	{
