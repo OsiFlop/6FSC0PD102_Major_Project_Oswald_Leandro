@@ -357,6 +357,14 @@ protected:
 		int32 VerticalMode
 	) const;
 
+	int32 GetSignedHeadingDeltaBuckets(int32 FromHeading, int32 ToHeading) const;
+
+	bool RebuildPrimitiveSamplesBetweenStates(
+		const FFlightPathState& FromState,
+		const FFlightPathState& ToState,
+		TArray<FVector>& OutSamplePoints
+	) const;
+
 	// Check if current state reaches goal position
 	bool IsGoalState(const FFlightPathState& Current, const FFlightPathState& Goal) const;
 
