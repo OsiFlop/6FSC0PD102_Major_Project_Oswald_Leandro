@@ -38,7 +38,7 @@ void ARoutePlannerManager::SetSelectedFlightProfile(UFlightProfile* NewProfile)
 	{
 		// Debug log: show selected aircraft values
 		UE_LOG(LogTemp, Display,
-			TEXT("RoutePlanner: Flugzeugprofil gewechselt: %s | Asset=%s | MaxAlt=%.1fm | Clearance=%.1fm | Speed=%.1fm/s | Climb=%.1fm/s | Descent=%.1fm/s | TurnRadius=%.1fm"),
+			TEXT("RoutePlanner: Aircraft profile changed: %s | Asset=%s | MaxAlt=%.1fm | Clearance=%.1fm | Speed=%.1fm/s | Climb=%.1fm/s | Descent=%.1fm/s | TurnRadius=%.1fm"),
 			*NewProfile->AircraftName,
 			*NewProfile->GetPathName(),
 			NewProfile->MaxAltitudeMetersASL,
