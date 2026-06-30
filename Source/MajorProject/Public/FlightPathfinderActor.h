@@ -17,6 +17,7 @@ class AVoxelGridBaker;
 class UVoxelHeightCache;
 class UFlightProfile;
 class AFlightInfluenceZoneActor;
+class AFlightWeatherZoneActor;
 
 // Flight search state
 // X / Y / Z = voxel position
@@ -230,6 +231,42 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="References")
 	TArray<TObjectPtr<AFlightInfluenceZoneActor>> InfluenceZones;
 
+	// bUseWeatherZones: true when the UI/weather option should affect route search
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weather")
+	bool bUseWeatherZones = false;
+
+	// WeatherZones: static weather volumes collected from the current level
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Weather")
+	TArray<TObjectPtr<AFlightWeatherZoneActor>> WeatherZones;
+
+	// ScatteredCloudFlightLevelThresholdMetersASL: FL100 threshold in meters ASL
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
+	float ScatteredCloudFlightLevelThresholdMetersASL = 3048.0f;
+
+	// ScatteredCloudHorizontalClearanceBelowFL100Meters: VFR horizontal cloud distance below FL100
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
+	float ScatteredCloudHorizontalClearanceBelowFL100Meters = 1500.0f;
+
+	// ScatteredCloudVerticalClearanceBelowFL100Meters: VFR vertical cloud distance below FL100
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
+	float ScatteredCloudVerticalClearanceBelowFL100Meters = 300.0f;
+
+	// ScatteredCloudHorizontalClearanceAboveFL100Meters: VFR horizontal cloud distance at or above FL100
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
+	float ScatteredCloudHorizontalClearanceAboveFL100Meters = 1500.0f;
+
+	// ScatteredCloudVerticalClearanceAboveFL100Meters: VFR vertical cloud distance at or above FL100
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
+	float ScatteredCloudVerticalClearanceAboveFL100Meters = 300.0f;
+
+	// ScatteredCloudVisibilityBelowFL100Meters: reference VFR visibility below FL100
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
+	float ScatteredCloudVisibilityBelowFL100Meters = 5000.0f;
+
+	// ScatteredCloudVisibilityAboveFL100Meters: reference VFR visibility at or above FL100
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
+	float ScatteredCloudVisibilityAboveFL100Meters = 8000.0f;
+
 	// VoxelSizeZMeters: vertical height of one search layer
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="1.0"))
 	float VoxelSizeZMeters = 25.0f;
@@ -362,6 +399,10 @@ public:
 	// Clear route result and debug drawings
 	UFUNCTION(CallInEditor, Category="Flight Pathfinding")
 	void ClearCurrentRoute();
+
+	// Collect static weather zones from the current level
+	UFUNCTION(CallInEditor, BlueprintCallable, Category="Flight Pathfinding|Weather")
+	void CollectWeatherZones();
 
 	// PrimitiveSegmentLengthMeters: preferred motion primitive length
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="100.0"))
@@ -575,6 +616,26 @@ protected:
 		float FromAltitudeMetersASL,
 		float ToAltitudeMetersASL
 	) const;
+
+	// Check if point is inside blocking thunderstorm or fog weather
+	bool IsPointInsideBlockingWeatherZone(const FVector& WorldPoint) const;
+
+	// Check if segment intersects blocking thunderstorm or fog weather
+	bool DoesSegmentIntersectBlockingWeatherZone(const FVector& FromWorld, const FVector& ToWorld) const;
+
+	// Get scattered-cloud clearance for the current altitude band
+	void GetScatteredCloudClearanceForAltitude(
+		float AltitudeMetersASL,
+		float& OutHorizontalClearanceMeters,
+		float& OutVerticalClearanceMeters
+	) const;
+
+	// Check if point violates scattered-cloud VFR clearance
+	bool DoesPointViolateScatteredCloudClearance(const FVector& WorldPoint) const;
+
+	// Check if segment violates scattered-cloud VFR clearance
+	bool DoesSegmentViolateScatteredCloudClearance(const FVector& FromWorld, const FVector& ToWorld) const;
+
 
 	// Calculate extra cost for soft influence zones
 	float GetSoftZoneTraversalCost(

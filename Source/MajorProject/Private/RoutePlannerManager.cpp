@@ -128,9 +128,10 @@ FRouteCalculationResult ARoutePlannerManager::CalculateRouteFromMarkers(
 		return Result;
 	}
 
-	// Sync final profile choice with manager and pathfinder
+	// Sync final profile choice and route options with manager and pathfinder
 	SelectedFlightProfile = ProfileToUse;
 	PathfinderActor->FlightProfile = ProfileToUse;
+	PathfinderActor->bUseWeatherZones = bShowWeather;
 
 	// Debug log: profile values used for this calculation
 	UE_LOG(LogTemp, Display,

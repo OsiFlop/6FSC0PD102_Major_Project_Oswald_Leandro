@@ -12,13 +12,36 @@
 #include "Navigation/Grid/VoxelHeightCache.h"
 #include "FlightProfile.h"
 #include "FlightInfluenceZoneActor.h"
+#include "FlightWeatherZoneActor.h"
 
 #include "DrawDebugHelpers.h"
+#include "EngineUtils.h"
 
 AFlightPathfinderActor::AFlightPathfinderActor()
 {
 	// No runtime tick needed
 	PrimaryActorTick.bCanEverTick = false;
+}
+
+void AFlightPathfinderActor::CollectWeatherZones()
+{
+	WeatherZones.Reset();
+
+	if (!GetWorld())
+	{
+		return;
+	}
+
+	for (TActorIterator<AFlightWeatherZoneActor> It(GetWorld()); It; ++It)
+	{
+		AFlightWeatherZoneActor* Zone = *It;
+		if (Zone)
+		{
+			WeatherZones.Add(Zone);
+		}
+	}
+
+	UE_LOG(LogTemp, Display, TEXT("FlightPathfinder: Collected %d weather zones."), WeatherZones.Num());
 }
 
 // Validate setup for editor-based route search
@@ -1644,6 +1667,19 @@ bool AFlightPathfinderActor::IsStateInsideHardBlockZone(const FVector& WorldPoin
 			return true;
 		}
 	}
+
+	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
+	{
+		if (!Zone || !Zone->IsWeatherEnabled())
+		{
+			continue;
+		}
+
+		if (Zone->IsHardBlock() && Zone->ContainsPoint(WorldPoint))
+		{
+			return true;
+		}
+	}
 	return false;
 }
 
@@ -1667,6 +1703,144 @@ bool AFlightPathfinderActor::DoesSegmentIntersectHardBlockZone(
 		                                                          ToAltitudeMetersASL))
 		{
 			// Segment intersects blocked zone
+			return true;
+		}
+	}
+
+	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
+	{
+		if (!Zone || !Zone->IsWeatherEnabled())
+		{
+			continue;
+		}
+
+		if (Zone->IsHardBlock() && Zone->IntersectsSegmentBySampling(FromWorld, ToWorld))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool AFlightPathfinderActor::IsPointInsideBlockingWeatherZone(const FVector& WorldPoint) const
+{
+	if (!bUseWeatherZones)
+	{
+		return false;
+	}
+
+	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
+	{
+		if (!Zone)
+		{
+			continue;
+		}
+
+		if (Zone->IsHardBlock() && Zone->ContainsPoint(WorldPoint))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool AFlightPathfinderActor::DoesSegmentIntersectBlockingWeatherZone(
+	const FVector& FromWorld,
+	const FVector& ToWorld
+) const
+{
+	if (!bUseWeatherZones)
+	{
+		return false;
+	}
+
+	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
+	{
+		if (!Zone)
+		{
+			continue;
+		}
+
+		if (Zone->IsHardBlock() && Zone->IntersectsSegmentBySampling(FromWorld, ToWorld))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void AFlightPathfinderActor::GetScatteredCloudClearanceForAltitude(
+	float AltitudeMetersASL,
+	float& OutHorizontalClearanceMeters,
+	float& OutVerticalClearanceMeters
+) const
+{
+	if (AltitudeMetersASL >= ScatteredCloudFlightLevelThresholdMetersASL)
+	{
+		OutHorizontalClearanceMeters = FMath::Max(0.0f, ScatteredCloudHorizontalClearanceAboveFL100Meters);
+		OutVerticalClearanceMeters = FMath::Max(0.0f, ScatteredCloudVerticalClearanceAboveFL100Meters);
+		return;
+	}
+
+	OutHorizontalClearanceMeters = FMath::Max(0.0f, ScatteredCloudHorizontalClearanceBelowFL100Meters);
+	OutVerticalClearanceMeters = FMath::Max(0.0f, ScatteredCloudVerticalClearanceBelowFL100Meters);
+}
+
+bool AFlightPathfinderActor::DoesPointViolateScatteredCloudClearance(const FVector& WorldPoint) const
+{
+	if (!bUseWeatherZones)
+	{
+		return false;
+	}
+
+	const float AltitudeMetersASL = GetAltitudeMetersASLFromWorldZ(WorldPoint.Z);
+	float HorizontalClearanceMeters = 0.0f;
+	float VerticalClearanceMeters = 0.0f;
+	GetScatteredCloudClearanceForAltitude(AltitudeMetersASL, HorizontalClearanceMeters, VerticalClearanceMeters);
+
+	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
+	{
+		if (!Zone || !Zone->IsWeatherEnabled() || !Zone->IsScatteredClouds())
+		{
+			continue;
+		}
+
+		if (Zone->ContainsPointWithClearance(WorldPoint, HorizontalClearanceMeters, VerticalClearanceMeters))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool AFlightPathfinderActor::DoesSegmentViolateScatteredCloudClearance(
+	const FVector& FromWorld,
+	const FVector& ToWorld
+) const
+{
+	if (!bUseWeatherZones)
+	{
+		return false;
+	}
+
+	const float DistanceCm = FVector::Distance(FromWorld, ToWorld);
+	if (DistanceCm <= KINDA_SMALL_NUMBER)
+	{
+		return DoesPointViolateScatteredCloudClearance(FromWorld);
+	}
+
+	const float SampleStepCm = FMath::Max(10000.0f, HeightCache ? HeightCache->CellSizeCm : 10000.0f);
+	const int32 NumSteps = FMath::Max(1, FMath::CeilToInt(DistanceCm / SampleStepCm));
+
+	for (int32 Step = 0; Step <= NumSteps; ++Step)
+	{
+		const float Alpha = static_cast<float>(Step) / static_cast<float>(NumSteps);
+		const FVector SamplePoint = FMath::Lerp(FromWorld, ToWorld, Alpha);
+
+		if (DoesPointViolateScatteredCloudClearance(SamplePoint))
+		{
 			return true;
 		}
 	}
@@ -2209,6 +2383,7 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 	// Add penalty when crossing soft influence zones
 	Cost += GetSoftZoneTraversalCost(FromWorld, ToWorld, FromAltitudeMetersASL, ToAltitudeMetersASL);
 
+
 	// Penalize climbs so the search plans altitude changes earlier
 	const float DeltaZMeters = (ToWorld.Z - FromWorld.Z) / 100.0f;
 	if (DeltaZMeters > 0.0f)
@@ -2290,6 +2465,7 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 		// Discourage tiny movement steps that create jitter
 		Cost += 10.0f;
 	}
+
 	return Cost;
 }
 
@@ -2673,6 +2849,17 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 		// Stop if required route data is missing
 		LastFailureReason = ERouteFailureReason::Unknown;
 		return false;
+	}
+
+	if (bUseWeatherZones)
+	{
+		// Refresh static weather zone list for this search
+		CollectWeatherZones();
+	}
+	else
+	{
+		// Weather is disabled in UI/editor options and must not affect routing
+		WeatherZones.Reset();
 	}
 
 	// Log aircraft values used for this route
