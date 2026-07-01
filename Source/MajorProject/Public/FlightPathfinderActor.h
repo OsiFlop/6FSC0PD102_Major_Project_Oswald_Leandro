@@ -1,7 +1,7 @@
 // Flight pathfinder actor
 // Header for aircraft-aware A* route search
 // Uses voxel position plus heading direction as search state
-// Checks terrain clearance, aircraft limits and influence zones
+// Checks terrain clearance, aircraft limits, weather and influence zones
 // Supports motion primitives, direct routes, caching and UI result output
 // Stores route result, failure stats and debug draw settings
 
@@ -19,27 +19,25 @@ class UFlightProfile;
 class AFlightInfluenceZoneActor;
 class AFlightWeatherZoneActor;
 
-// Flight search state
-// X / Y / Z = voxel position
-// HeadingIndex = discretized flight direction
+// Search state used by A*
 USTRUCT(BlueprintType)
 struct FFlightPathState
 {
 	GENERATED_BODY()
 
-	// X: grid column
+	// Grid column
 	UPROPERTY(VisibleAnywhere)
 	int32 X = 0;
 
-	// Y: grid row
+	// Grid row
 	UPROPERTY(VisibleAnywhere)
 	int32 Y = 0;
 
-	// Z: vertical voxel layer
+	// Vertical search layer
 	UPROPERTY(VisibleAnywhere)
 	int32 Z = 0;
 
-	// HeadingIndex: current direction bucket
+	// Discrete flight direction
 	UPROPERTY(VisibleAnywhere)
 	int32 HeadingIndex = 0;
 
@@ -51,39 +49,44 @@ struct FFlightPathState
 	{
 	}
 
-	// Compare position and heading
+	// Compare full search state
 	bool operator==(const FFlightPathState& Other) const
 	{
 		return X == Other.X && Y == Other.Y && Z == Other.Z && HeadingIndex == Other.HeadingIndex;
 	}
 };
 
-// Route failure statistics
-// Counts why neighbor states or route checks failed
-// For debugging 
+// Debug counters for failed route checks
 USTRUCT()
 struct FRouteFailureStats
 {
 	GENERATED_BODY()
 
-	// OutOfBoundsCount: states outside search space
+	// State was outside search space
 	int32 OutOfBoundsCount = 0;
-	// InvalidTargetStateCount: target state could not be used
+
+	// Target state could not be used
 	int32 InvalidTargetStateCount = 0;
-	// TerrainClearanceCount: terrain clearance rule failed
+
+	// Terrain clearance rule failed
 	int32 TerrainClearanceCount = 0;
-	// HardBlockZoneCount: route touched forbidden zone
+
+	// Route touched forbidden airspace
 	int32 HardBlockZoneCount = 0;
-	// MaxClimbExceededCount: climb rate too high
+
+	// Climb rate was too high
 	int32 MaxClimbExceededCount = 0;
-	// MaxDescentExceededCount: descent rate too high
+
+	// Descent rate was too high
 	int32 MaxDescentExceededCount = 0;
-	// TurnRadiusTooSmallCount: turn tighter than aircraft allows
+
+	// Turn was tighter than aircraft allows
 	int32 TurnRadiusTooSmallCount = 0;
-	// NoValidNeighborsCount: state had no usable next steps
+
+	// State had no usable next steps
 	int32 NoValidNeighborsCount = 0;
 
-	// Reset all debug counters before new search
+	// Reset counters before a new search
 	void Reset()
 	{
 		OutOfBoundsCount = 0;
@@ -97,7 +100,7 @@ struct FRouteFailureStats
 	}
 };
 
-// Hash flight state for TMap / TSet usage
+// Hash flight state for maps and sets
 FORCEINLINE uint32 GetTypeHash(const FFlightPathState& State)
 {
 	uint32 Hash = GetTypeHash(State.X);
@@ -107,73 +110,70 @@ FORCEINLINE uint32 GetTypeHash(const FFlightPathState& State)
 	return Hash;
 }
 
-// A* node data for one flight state
-// Stores cost values, parent link and closed state
+// A* node data for one search state
 USTRUCT()
 struct FFlightPathNodeRecord
 {
 	GENERATED_BODY()
 
-	// G: cost from start to this state
+	// Cost from start to this state
 	float G = TNumericLimits<float>::Max();
 
-	// H: estimated cost from this state to goal
+	// Estimated cost from this state to goal
 	float H = 0.0f;
 
-	// F: total priority cost, G + HeuristicWeight * H
+	// Total priority cost
 	float F = TNumericLimits<float>::Max();
 
-	// Parent: previous state in best known route
+	// Previous state in best known route
 	FFlightPathState Parent;
 
-	// bHasParent: false for start state
+	// Start state has no parent
 	bool bHasParent = false;
 
-	// bClosed: already fully checked by A*
+	// State was already fully processed
 	bool bClosed = false;
 };
 
-// Open heap entry
-// Stores state plus current F score for priority queue
+// Priority queue entry for A*
 USTRUCT()
 struct FFlightOpenEntry
 {
 	GENERATED_BODY()
 
-	// State: candidate waiting for A* expansion
+	// Candidate waiting for expansion
 	FFlightPathState State;
 
-	// FScore: priority value used by heap
+	// Priority value used by heap
 	float FScore = 0.0f;
 
 	FFlightOpenEntry() = default;
 
-	// Create heap entry from state and F score
+	// Create heap entry from state and score
 	FFlightOpenEntry(const FFlightPathState& InState, float InFScore)
 		: State(InState), FScore(InFScore)
 	{
 	}
 };
 
-// Heap compare rule -> Lower FScore should be popped first
 struct FFlightOpenEntryMinHeapPredicate
 {
 	bool operator()(const FFlightOpenEntry& A, const FFlightOpenEntry& B) const
 	{
-		return A.FScore < B.FScore;
+		return A.FScore > B.FScore;
 	}
 };
 
-// Transition cache key -> Identifies movement from one state to another
+// Cache key for one state transition
 USTRUCT()
 struct FFlightTransitionKey
 {
 	GENERATED_BODY()
 
-	// From: start state of cached transition
+	// Transition start state
 	FFlightPathState From;
-	
-	// To: end state of cached transition
+
+	// Transition end state
 	FFlightPathState To;
 
 	FFlightTransitionKey() = default;
@@ -207,180 +207,237 @@ class MAJORPROJECT_API AFlightPathfinderActor : public AActor
 public:
 	AFlightPathfinderActor();
 
-	// GridBaker: source actor for baked terrain grid
+	// Source actor for baked terrain grid
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="References")
 	TObjectPtr<AVoxelGridBaker> GridBaker;
 
-	// HeightCache: baked terrain height data for route validation
+	// Baked terrain height data for route validation
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="References")
 	TObjectPtr<UVoxelHeightCache> HeightCache;
 
-	// FlightProfile: aircraft limits and safety values
+	// Aircraft limits and safety values
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="References")
 	TObjectPtr<UFlightProfile> FlightProfile;
 
-	// StartActor: route start position
+	// Actor used as editor route start
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="References")
 	TObjectPtr<AActor> StartActor;
 
-	// GoalActor: route target position
+	// Actor used as editor route target
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="References")
 	TObjectPtr<AActor> GoalActor;
 
-	// InfluenceZones: hard blocks or soft cost areas for route search
+	// Hard blocks or soft cost areas for route search
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="References")
 	TArray<TObjectPtr<AFlightInfluenceZoneActor>> InfluenceZones;
 
-	// bUseWeatherZones: true when the UI/weather option should affect route search
+	// Enable restricted and influence zones for route search
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Influence")
+	bool bUseInfluenceZones = true;
+
+	// Horizontal no-go buffer around hard influence zones
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Influence|Hard Blocks", meta=(ClampMin="0.0"))
+	float InfluenceZoneHorizontalAvoidanceMeters = 500.0f;
+
+	// Vertical no-go buffer around hard influence zones
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Influence|Hard Blocks", meta=(ClampMin="0.0"))
+	float InfluenceZoneVerticalAvoidanceMeters = 300.0f;
+
+	// Enable weather zones for route search
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weather")
 	bool bUseWeatherZones = false;
 
-	// WeatherZones: static weather volumes collected from the current level
+	// Static weather volumes collected from the level
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Weather")
 	TArray<TObjectPtr<AFlightWeatherZoneActor>> WeatherZones;
 
-	// ScatteredCloudFlightLevelThresholdMetersASL: FL100 threshold in meters ASL
+	// Altitude threshold for VFR cloud clearance rules
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
 	float ScatteredCloudFlightLevelThresholdMetersASL = 3048.0f;
 
-	// ScatteredCloudHorizontalClearanceBelowFL100Meters: VFR horizontal cloud distance below FL100
+	// Horizontal cloud clearance below threshold altitude
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
 	float ScatteredCloudHorizontalClearanceBelowFL100Meters = 1500.0f;
 
-	// ScatteredCloudVerticalClearanceBelowFL100Meters: VFR vertical cloud distance below FL100
+	// Vertical cloud clearance below threshold altitude
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
 	float ScatteredCloudVerticalClearanceBelowFL100Meters = 300.0f;
 
-	// ScatteredCloudHorizontalClearanceAboveFL100Meters: VFR horizontal cloud distance at or above FL100
+	// Horizontal cloud clearance at or above threshold altitude
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
 	float ScatteredCloudHorizontalClearanceAboveFL100Meters = 1500.0f;
 
-	// ScatteredCloudVerticalClearanceAboveFL100Meters: VFR vertical cloud distance at or above FL100
+	// Vertical cloud clearance at or above threshold altitude
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
 	float ScatteredCloudVerticalClearanceAboveFL100Meters = 300.0f;
 
-	// ScatteredCloudVisibilityBelowFL100Meters: reference VFR visibility below FL100
+	// Reference VFR visibility below threshold altitude
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
 	float ScatteredCloudVisibilityBelowFL100Meters = 5000.0f;
 
-	// ScatteredCloudVisibilityAboveFL100Meters: reference VFR visibility at or above FL100
+	// Reference VFR visibility at or above threshold altitude
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Scattered Clouds", meta=(ClampMin="0.0"))
 	float ScatteredCloudVisibilityAboveFL100Meters = 8000.0f;
 
-	// VoxelSizeZMeters: vertical height of one search layer
+	// Horizontal no-go buffer around thunderstorms
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Hard Blocks", meta=(ClampMin="0.0"))
+	float ThunderstormHorizontalAvoidanceMeters = 5000.0f;
+
+	// Vertical no-go buffer around thunderstorms
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Hard Blocks", meta=(ClampMin="0.0"))
+	float ThunderstormVerticalAvoidanceMeters = 20000.0f;
+
+	// Horizontal no-go buffer around fog
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Hard Blocks", meta=(ClampMin="0.0"))
+	float FogHorizontalAvoidanceMeters = 1000.0f;
+
+	// Vertical no-go buffer around fog
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weather|Hard Blocks", meta=(ClampMin="0.0"))
+	float FogVerticalAvoidanceMeters = 300.0f;
+
+	// Vertical height of one search layer
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="1.0"))
 	float VoxelSizeZMeters = 25.0f;
 
-	// ExtraBottomLayers: added layers below relevant terrain / route height
+	// Extra layers below relevant terrain and route height
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="0"))
 	int32 ExtraBottomLayers = 0;
 
-	// ExtraTopLayers: added layers above relevant terrain / route height
+	// Extra layers above relevant terrain and route height
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="0"))
-	int32 ExtraTopLayers = 8;
+	int32 ExtraTopLayers = 32;
 
-	// HeadingBucketCount: number of possible flight directions
+	// Number of possible flight directions
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="4", ClampMax="32"))
 	int32 HeadingBucketCount = 16;
 
-	// MaxHeadingChangePerStep: max direction change per search step
+	// Enable several movement lengths per A* state
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model|Adaptive Search")
+	bool bUseAdaptivePrimitiveLengths = true;
+
+	// Short movement multiplier for tight local corrections
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model|Adaptive Search", meta=(ClampMin="0.2", ClampMax="1.0"))
+	float ShortPrimitiveLengthMultiplier = 0.55f;
+
+	// Long movement multiplier for early detours and early climb planning
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model|Adaptive Search", meta=(ClampMin="1.0", ClampMax="3.0"))
+	float LongPrimitiveLengthMultiplier = 1.75f;
+
+	// Optional extra-long movement used only when obstacle-aware routing is active
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model|Adaptive Search", meta=(ClampMin="1.0", ClampMax="4.0"))
+	float ObstacleAwareLongPrimitiveLengthMultiplier = 2.25f;
+
+	// Maximum direction change per search step
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="0", ClampMax="4"))
 	int32 MaxHeadingChangePerStep = 1;
 
-	// bAllowClimbStep: allow neighbor states one layer higher
+	// Allow neighbor states one layer higher
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model")
 	bool bAllowClimbStep = true;
 
-	// bAllowDescentStep: allow neighbor states one layer lower
+	// Allow neighbor states one layer lower
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model")
 	bool bAllowDescentStep = true;
 
-	// bDrawVisitedStates: draw checked A* states for debugging
+	// Draw checked A* states for debugging
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Debug")
 	bool bDrawVisitedStates = false;
 
-	// bAutoDrawPathAfterSearch: draw route after successful search
+	// Draw route after successful search
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Debug")
 	bool bAutoDrawPathAfterSearch = true;
 
-	// DebugDrawLifetime: seconds until temporary debug shapes disappear
+	// Lifetime of debug shapes in seconds
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Debug", meta=(ClampMin="0.0"))
 	float DebugDrawLifetime = 20.0f;
 
-	// DebugLineThickness: route line thickness
+	// Thickness of drawn route lines
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Debug", meta=(ClampMin="0.0"))
 	float DebugLineThickness = 6.0f;
 
-	// DebugVisitedPointSize: point size for visited states
+	// Size of visited-state debug points
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Debug", meta=(ClampMin="0.0"))
 	float DebugVisitedPointSize = 16.0f;
 
-	// FailureStats: counters for failed validation reasons
+	// Counters for failed validation reasons
 	UPROPERTY(VisibleAnywhere, Category="Debug")
 	mutable FRouteFailureStats FailureStats;
 
-	// LastFailureReason: latest high-level route failure reason
+	// Latest high-level route failure reason
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Debug")
 	mutable ERouteFailureReason LastFailureReason = ERouteFailureReason::None;
 
-	// SearchMinWorld: minimum world-space bounds of search space
+	// Minimum world-space bounds of search space
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
 	FVector SearchMinWorld = FVector::ZeroVector;
 
-	// SearchMaxWorld: maximum world-space bounds of search space
+	// Maximum world-space bounds of search space
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
 	FVector SearchMaxWorld = FVector::ZeroVector;
 
-	// ZLayerCount: amount of vertical search layers
+	// Number of vertical search layers
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
 	int32 ZLayerCount = 0;
 
-	// HeuristicWeight: A* goal bias, higher = faster but less optimal
+	// A* goal bias, higher is faster but less optimal
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="1.0"))
 	float HeuristicWeight = 1.0f;
 
-	// SearchMaxExpandedStates: hard limit for A* search work
+	// Minimum A* goal bias when obstacles are active
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="1.0"))
+	float ObstacleAwareHeuristicWeight = 1.2f;
+
+	// Hard limit for A* search work
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="10000"))
 	int32 SearchMaxExpandedStates = 1500000;
 
-	// GoalConnectionToleranceMeters: distance where direct goal connection may be accepted
+	// Distance where direct goal connection may be accepted
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="0.0"))
 	float GoalConnectionToleranceMeters = 900.0f;
 
-	// DirectRoutePreferredClearanceMaxLengthMeters: max length for direct preferred-clearance route check
-	// 0 = disabled or no extra max length rule
+	// Larger finish tolerance when detour obstacles are active
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="1.0"))
+	float ObstacleAwareGoalConnectionMultiplier = 3.0f;
+
+	// Maximum length for direct preferred-clearance shortcut checks
+	// 0 disables this extra length rule
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="0.0"))
 	float DirectRoutePreferredClearanceMaxLengthMeters = 0.0f;
 
-	// MinimumAbsoluteTerrainClearanceMeters: absolute lower safety clearance
+	// Absolute lower terrain clearance limit
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Safety", meta=(ClampMin="0.0"))
 	float MinimumAbsoluteTerrainClearanceMeters = 50.0f;
 
-	// TerrainClearanceSafetyMultiplier: multiplier for profile clearance
+	// Multiplier for preferred terrain clearance
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Safety", meta=(ClampMin="1.0"))
 	float TerrainClearanceSafetyMultiplier = 1.5f;
 
-	// LateralTerrainSafetyRadiusMultiplier: horizontal radius for conservative terrain sampling
+	// Horizontal radius for conservative terrain sampling
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Safety", meta=(ClampMin="0.0"))
 	float LateralTerrainSafetyRadiusMultiplier = 1.0f;
 
-	// PreferredClearanceSpeedLookaheadSeconds: speed-based extra clearance lookahead
+	// Speed-based extra clearance lookahead
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Safety", meta=(ClampMin="0.0"))
 	float PreferredClearanceSpeedLookaheadSeconds = 6.0f;
 
-	// MinOutputWaypointSpacingMeters: minimum spacing after route compaction
+	// Minimum spacing after route compaction
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Result", meta=(ClampMin="0.0"))
-	float MinOutputWaypointSpacingMeters = 750.0f;
+	float MinOutputWaypointSpacingMeters = 300.0f;
 
-	// MaxOutputWaypointCompactionLookahead: max points tested during waypoint simplification
+	// Maximum points tested during waypoint simplification
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Result", meta=(ClampMin="2", ClampMax="64"))
-	int32 MaxOutputWaypointCompactionLookahead = 16;
+	int32 MaxOutputWaypointCompactionLookahead = 6;
 
-	// CurrentRouteWorldPoints: final route as world-space positions
+	// Enable waypoint simplification after A*.
+	// Keep this disabled while testing route correctness because aggressive compaction can create sharp corners.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Result")
+	bool bUseWaypointCompaction = false;
+	
+	// Final route as world-space positions
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Result")
 	TArray<FVector> CurrentRouteWorldPoints;
 
-	// LastExpandedStates: amount of states checked in last search
+	// Number of states checked in last search
 	UPROPERTY(BlueprintReadOnly, Category = "Flight Pathfinding|Debug")
 	int32 LastExpandedStates = 0;
 
@@ -400,29 +457,41 @@ public:
 	UFUNCTION(CallInEditor, Category="Flight Pathfinding")
 	void ClearCurrentRoute();
 
-	// Collect static weather zones from the current level
+	// Collect static influence zones from current level
+	UFUNCTION(CallInEditor, BlueprintCallable, Category="Flight Pathfinding|Influence")
+	void CollectInfluenceZones();
+	
+	// Collect static weather zones from current level
 	UFUNCTION(CallInEditor, BlueprintCallable, Category="Flight Pathfinding|Weather")
 	void CollectWeatherZones();
 
-	// PrimitiveSegmentLengthMeters: preferred motion primitive length
+	// Preferred motion primitive length
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="100.0"))
 	float PrimitiveSegmentLengthMeters = 400.0f;
 
-	// PrimitiveSamplesPerSegment: sample count for primitive validation
+	// Minimum step size when detour obstacles are active
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="100.0"))
+	float ObstacleAwarePrimitiveSegmentLengthMeters = 1200.0f;
+
+	// Sample count for primitive validation
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="2", ClampMax="32"))
 	int32 PrimitiveSamplesPerSegment = 8;
 
-	// PrimitiveClimbRateFactor: safety factor for climb / descent inside primitive
+	// Safety factor for climb and descent inside primitive
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="0.1", ClampMax="1.0"))
 	float PrimitiveClimbRateFactor = 0.85f;
 
-	// MaxAutoPrimitiveSegmentLengthMeters: upper limit for automatic primitive length
+	// Upper limit for automatic primitive length
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="100.0"))
 	float MaxAutoPrimitiveSegmentLengthMeters = 2500.0f;
 
-	// PrimitiveTurnDeltaBuckets: heading change used by primitive turns
+	// Heading change used by primitive turns
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="1", ClampMax="4"))
 	int32 PrimitiveTurnDeltaBuckets = 1;
+
+	// Wider turn options when routing around blocked zones
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="1", ClampMax="4"))
+	int32 ObstacleAwareTurnDeltaBuckets = 2;
 
 	// Calculate route from UI input and return structured result
 	UFUNCTION(BlueprintCallable, Category = "Flight Pathfinding")
@@ -442,7 +511,7 @@ protected:
 	// Check required references and profile values
 	bool ValidateReferences() const;
 
-	// Check state inside built search bounds
+	// Check if state lies inside built search bounds
 	bool IsStateInsideBounds(const FFlightPathState& State) const;
 
 	// Convert state to world-space center position
@@ -452,10 +521,10 @@ protected:
 	bool WorldToNearestValidState(const FVector& WorldPos, int32 PreferredHeadingIndex,
 	                              FFlightPathState& OutState) const;
 
-	// Convert world position directly to state -> fails if position is outside grid or Z range
+	// Convert world position directly to a search state
 	bool WorldToStateExact(const FVector& WorldPos, int32 HeadingIndex, FFlightPathState& OutState) const;
 
-	// Build sampled points for one motion primitive -> used to check terrain, altitude and zone safety along curved/straight movement
+	// Build sampled points for one aircraft movement step
 	bool BuildPrimitiveSamplePoints(
 		const FFlightPathState& FromState,
 		int32 HeadingDeltaBuckets,
@@ -464,7 +533,7 @@ protected:
 		int32& OutEndHeading
 	) const;
 
-	// Apply motion primitive and output resulting state -> uses heading delta and vertical mode to move aircraft-like
+	// Apply motion primitive and output resulting state
 	bool ApplyMotionPrimitive(
 		const FFlightPathState& FromState,
 		int32 HeadingDeltaBuckets,
@@ -472,7 +541,7 @@ protected:
 		FFlightPathState& OutState
 	) const;
 
-	// Validate full motion primitive between states -> checks sampled path, climb/descent and aircraft limits
+	// Validate one full motion primitive between states
 	bool IsMotionPrimitiveValid(
 		const FFlightPathState& FromState,
 		const FFlightPathState& ToState,
@@ -480,20 +549,20 @@ protected:
 		int32 VerticalMode
 	) const;
 
-	// Get signed heading difference between buckets -> keeps left/right turn direction information
+	// Get signed turn direction between heading buckets
 	int32 GetSignedHeadingDeltaBuckets(int32 FromHeading, int32 ToHeading) const;
 
-	// Rebuild primitive samples for known state transition -> used for route validation or route reconstruction
+	// Rebuild sampled primitive between stored states
 	bool RebuildPrimitiveSamplesBetweenStates(
 		const FFlightPathState& FromState,
 		const FFlightPathState& ToState,
 		TArray<FVector>& OutSamplePoints
 	) const;
 
-	// Check if current state reaches goal position
+	// Check if current state reaches goal voxel
 	bool IsGoalState(const FFlightPathState& Current, const FFlightPathState& Goal) const;
 
-	// Normalize heading index into valid bucket range
+	// Keep heading index inside valid bucket range
 	int32 NormalizeHeadingIndex(int32 HeadingIndex) const;
 
 	// Convert heading bucket to angle in radians
@@ -505,16 +574,16 @@ protected:
 	// Get closest heading bucket from 2D direction
 	int32 ComputeNearestHeadingIndexFromDirection(const FVector2D& Direction) const;
 
-	// Get shortest signed / wrapped heading difference
+	// Get smallest turn amount between two headings
 	int32 GetSmallestHeadingDelta(int32 FromHeading, int32 ToHeading) const;
 
-	// Get cached terrain height at grid cell
+	// Read cached terrain height at grid cell
 	float GetTerrainHeightCmAtCell(int32 X, int32 Y) const;
 
-	// Get terrain height from world X / Y position
+	// Read terrain height from world XY position
 	bool GetTerrainHeightCmAtWorldXY(float WorldX, float WorldY, float& OutTerrainHeightCm) const;
 
-	// Get conservative terrain height around world XY -> samples nearby terrain using horizontal safety radius
+	// Read highest nearby terrain around world XY
 	bool GetConservativeTerrainHeightCmAtWorldXY(
 		float WorldX,
 		float WorldY,
@@ -522,49 +591,55 @@ protected:
 		float& OutTerrainHeightCm
 	) const;
 
-	// Convert Unreal world Z to altitude in meters ASL
+	// Convert Unreal world Z to meters ASL
 	float GetAltitudeMetersASLFromWorldZ(float WorldZCm) const;
 
-	// Get terrain height at cell in meters ASL
+	// Read terrain height at cell in meters ASL
 	float GetTerrainHeightMetersASLAtCell(int32 X, int32 Y) const;
 
-	// Get final required terrain clearance -> uses profile clearance and absolute minimum
+	// Get mandatory terrain clearance for this route
 	float GetRequiredTerrainClearanceMeters() const;
 
-	// Get preferred terrain clearance for safer direct routes
+	// Get preferred clearance used by route cost decisions
 	float GetPreferredTerrainClearanceMeters() const;
 
-	// Get lateral safety radius for required terrain checks
+	// Get radius used for mandatory terrain clearance
 	float GetTerrainSafetyRadiusMeters() const;
 
-	// Get larger lateral safety radius for preferred clearance checks
+	// Get wider radius used for preferred terrain clearance
 	float GetPreferredTerrainSafetyRadiusMeters() const;
 
-	// Get effective primitive length from aircraft and settings
+	// Get movement length used by motion primitives
 	float GetEffectivePrimitiveSegmentLengthMeters() const;
 
-	// Get maximum allowed world Z from profile max altitude
+	// Get A* heuristic weight for current obstacle setup
+	float GetEffectiveHeuristicWeight() const;
+
+	// Check if active obstacles need detour-oriented search settings
+	bool HasActiveRoutingDetourObstacles() const;
+
+	// Convert aircraft ceiling into world height
 	float GetMaxAllowedWorldZCm() const;
 
-	// Check if point is below aircraft max altitude
+	// Check if point stays below aircraft ceiling
 	bool DoesPointRespectAltitudeLimit(const FVector& WorldPoint) const;
-	
-	// Check if every route point respects max altitude
+
+	// Check if every route point stays below aircraft ceiling
 	bool DoesRouteRespectAltitudeLimit(const TArray<FVector>& RoutePoints) const;
 
-	// Check altitude limit along a segment
+	// Check if segment stays below aircraft ceiling
 	bool DoesSegmentRespectAltitudeLimit(const FVector& FromWorld, const FVector& ToWorld) const;
 
-	// Check if point has required terrain clearance
+	// Check mandatory terrain clearance at one point
 	bool DoesPointRespectTerrainClearance(const FVector& WorldPoint) const;
 
-	// Check if point has preferred terrain clearance
+	// Check preferred terrain clearance at one point
 	bool DoesPointRespectPreferredTerrainClearance(const FVector& WorldPoint) const;
 
 	// Check preferred terrain clearance along a segment
 	bool DoesSegmentRespectPreferredTerrainClearance(const FVector& FromWorld, const FVector& ToWorld) const;
 
-	// Check direct segment against core flight rules
+	// Check direct segment against all main flight rules
 	bool DoesDirectSegmentRespectFlightRules(
 		const FVector& FromWorld,
 		const FVector& ToWorld,
@@ -572,7 +647,7 @@ protected:
 		int32 ToHeadingIndex
 	) const;
 
-	// Try simple direct VFR route before full A* search -> can skip expensive search if direct path is safe
+	// Try simple direct VFR route before full A* search
 	bool TryBuildDirectVfrRoute(
 		const FVector& StartWorldLocation,
 		const FVector& TargetWorldLocation,
@@ -580,7 +655,7 @@ protected:
 		TArray<FVector>& OutRoutePoints
 	);
 
-	// Check if current state can connect directly to goal -> used near the target to finish route early
+	// Check if search can finish with a direct goal connection
 	bool CanConnectToGoal(
 		const FFlightPathState& Current,
 		const FFlightPathState& Goal,
@@ -588,28 +663,28 @@ protected:
 		int32 GoalHeadingIndex
 	) const;
 
-	// Validate full route against turn radius limits
+	// Check if route corners respect aircraft turn radius
 	bool DoesRouteRespectTurnRadius(const TArray<FVector>& RoutePoints) const;
 
-	// Final safety validation for CurrentRouteWorldPoints
+	// Run final safety checks on current route
 	bool ValidateCurrentRouteSafety() const;
 
 	// Reduce waypoint count while keeping route safe
 	void CompactCurrentRouteWaypoints();
 
-	// Check if state is flyable and safe
+	// Check if one search state is usable
 	bool IsStateValid(const FFlightPathState& State) const;
 
-	// Check if movement from one state to another is allowed
+	// Check if movement between two states is allowed
 	bool IsTransitionValid(const FFlightPathState& From, const FFlightPathState& To) const;
 
-	// Check terrain clearance along segment
+	// Check terrain clearance along a segment
 	bool DoesSegmentRespectTerrainClearance(const FVector& FromWorld, const FVector& ToWorld) const;
 
-	// Check if point is inside hard block zone
+	// Check if point lies inside forbidden airspace
 	bool IsStateInsideHardBlockZone(const FVector& WorldPoint, float AltitudeMetersASL) const;
 
-	// Check if segment intersects hard block zone
+	// Check if segment crosses forbidden airspace
 	bool DoesSegmentIntersectHardBlockZone(
 		const FVector& FromWorld,
 		const FVector& ToWorld,
@@ -617,27 +692,50 @@ protected:
 		float ToAltitudeMetersASL
 	) const;
 
-	// Check if point is inside blocking thunderstorm or fog weather
+	// Check if influence zone should affect route planning
+	bool IsInfluenceZoneActiveForRouting(const AFlightInfluenceZoneActor* Zone) const;
+
+	// Check if point enters a blocking influence zone
+	bool IsPointInsideBlockingInfluenceZone(const FVector& WorldPoint, float AltitudeMetersASL) const;
+
+	// Check if segment crosses a blocking influence zone
+	bool DoesSegmentIntersectBlockingInfluenceZone(
+		const FVector& FromWorld,
+		const FVector& ToWorld,
+		float FromAltitudeMetersASL,
+		float ToAltitudeMetersASL
+	) const;
+	
+	// Check if point enters blocking weather
 	bool IsPointInsideBlockingWeatherZone(const FVector& WorldPoint) const;
 
-	// Check if segment intersects blocking thunderstorm or fog weather
+	// Check if segment crosses blocking weather
 	bool DoesSegmentIntersectBlockingWeatherZone(const FVector& FromWorld, const FVector& ToWorld) const;
 
-	// Get scattered-cloud clearance for the current altitude band
+	// Check if weather zone should affect route planning
+	bool IsWeatherZoneActiveForRouting(const AFlightWeatherZoneActor* Zone) const;
+
+	// Get no-go clearance buffer for hard weather zones
+	void GetHardWeatherAvoidanceForZone(
+		const AFlightWeatherZoneActor* Zone,
+		float& OutHorizontalAvoidanceMeters,
+		float& OutVerticalAvoidanceMeters
+	) const;
+
+	// Get scattered-cloud clearance for current altitude band
 	void GetScatteredCloudClearanceForAltitude(
 		float AltitudeMetersASL,
 		float& OutHorizontalClearanceMeters,
 		float& OutVerticalClearanceMeters
 	) const;
 
-	// Check if point violates scattered-cloud VFR clearance
+	// Check if point violates scattered-cloud clearance
 	bool DoesPointViolateScatteredCloudClearance(const FVector& WorldPoint) const;
 
-	// Check if segment violates scattered-cloud VFR clearance
+	// Check if segment violates scattered-cloud clearance
 	bool DoesSegmentViolateScatteredCloudClearance(const FVector& FromWorld, const FVector& ToWorld) const;
 
-
-	// Calculate extra cost for soft influence zones
+	// Add route cost for soft influence zones
 	float GetSoftZoneTraversalCost(
 		const FVector& FromWorld,
 		const FVector& ToWorld,
@@ -645,72 +743,79 @@ protected:
 		float ToAltitudeMetersASL
 	) const;
 
-	// Generate valid neighbor states for A*
+	// Generate valid next states for A*
 	void GetNeighbors(const FFlightPathState& Current, TArray<FFlightPathState>& OutNeighbors) const;
 
-	// Estimate remaining A* cost to goal
+	// Estimate remaining cost for A*
 	float HeuristicCost(const FFlightPathState& A, const FFlightPathState& B) const;
 
 	// Calculate movement cost between two states
 	float TransitionCost(const FFlightPathState& From, const FFlightPathState& To) const;
 
-	// Pop best open state from heap -> skips outdated heap entries using current records
+	// Pop best usable A* state from open heap
 	bool PopBestOpenStateFromHeap(
 		TArray<FFlightOpenEntry>& OpenHeap,
 		const TMap<FFlightPathState, FFlightPathNodeRecord>& Records,
 		FFlightPathState& OutBestState
 	) const;
 
-	// Cached transition validity lookup -> avoids repeated expensive validation checks
+	// Get transition validity with cache support
 	bool IsTransitionValidCached(const FFlightPathState& From, const FFlightPathState& To) const;
-	
-	// Cached transition cost lookup -> avoids repeated soft-zone and movement cost calculation
+
+	// Get transition cost with cache support
 	float TransitionCostCached(const FFlightPathState& From, const FFlightPathState& To) const;
 
-	// Rebuild route from A* parent records
+	// Rebuild output route from A* parent links
 	void ReconstructRoute(
 		const TMap<FFlightPathState, FFlightPathNodeRecord>& Records,
 		const FFlightPathState& GoalState
 	);
 
-	// Calculate total horizontal / 3D route length
+	// Calculate total route length
 	float CalculateRouteLengthMeters() const;
 
 	// Calculate altitude difference from start to goal
 	float CalculateNetAltitudeChangeMeters() const;
 
-	// Calculate summed positive climb over route
+	// Calculate total climbed height along route
 	float CalculateTotalClimbMeters() const;
 
-	// TransitionValidityCache: stores valid/invalid result per transition
+	// Cached valid/invalid result per transition
 	mutable TMap<FFlightTransitionKey, bool> TransitionValidityCache;
 
-	// TransitionCostCache: stores movement cost per transition
+	// Cached movement cost per transition
 	mutable TMap<FFlightTransitionKey, float> TransitionCostCache;
 
-	// ConservativeTerrainHeightCache: stores sampled max terrain height per area
+	// Cached highest nearby terrain height per sampled area
 	mutable TMap<FIntVector, float> ConservativeTerrainHeightCache;
 
-	// Calculate penalty for alternating turn direction -> helps avoid nervous left-right-left route shapes
+	// Marks whether detour obstacle mode was already evaluated
+	mutable bool bRoutingDetourObstacleCacheValid = false;
+
+	// Cached detour mode for inner A* loops
+	mutable bool bCachedHasActiveRoutingDetourObstacles = false;
+
+	// Add penalty for immediate left-right turn changes
 	float CalculateTurnReversalPenalty(
-	const FFlightPathState& GrandParent,
-	const FFlightPathState& Parent,
-	const FFlightPathState& Current
-) const;
+		const FFlightPathState& GrandParent,
+		const FFlightPathState& Parent,
+		const FFlightPathState& Current
+	) const;
 
 	// Run internal flight route search
 	bool RunFlightRouteSearch(
-	const FVector& StartWorldLocation,
-	const FVector& TargetWorldLocation,
-	UFlightProfile* InFlightProfile,
-	TArray<FVector>& OutRoutePoints
-);
+		const FVector& StartWorldLocation,
+		const FVector& TargetWorldLocation,
+		UFlightProfile* InFlightProfile,
+		TArray<FVector>& OutRoutePoints
+	);
+
 	// Validate references that are always required
 	bool ValidateCoreReferences() const;
 
-	// Build search space around a specific route request -> uses start and target location instead of only actor references
+	// Build search space around a specific route request
 	void BuildSearchSpaceForRoute(
-	const FVector& StartWorldLocation,
-	const FVector& TargetWorldLocation
-);
+		const FVector& StartWorldLocation,
+		const FVector& TargetWorldLocation
+	);
 };

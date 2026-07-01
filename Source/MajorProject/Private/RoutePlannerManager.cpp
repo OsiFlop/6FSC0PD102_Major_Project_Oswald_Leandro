@@ -132,6 +132,7 @@ FRouteCalculationResult ARoutePlannerManager::CalculateRouteFromMarkers(
 	SelectedFlightProfile = ProfileToUse;
 	PathfinderActor->FlightProfile = ProfileToUse;
 	PathfinderActor->bUseWeatherZones = bShowWeather;
+	PathfinderActor->bUseInfluenceZones = bShowRestrictedZones;
 
 	// Debug log: profile values used for this calculation
 	UE_LOG(LogTemp, Display,

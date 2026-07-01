@@ -1,9 +1,9 @@
 // Flight pathfinder actor
 // Aircraft-aware A* route search
-// Uses terrain height cache, flight profile and influence zones
-// Search state = voxel position plus heading direction
-// Validates terrain clearance, climb / descent limits, turn radius and blocked zones
-// Supports direct VFR route, motion primitives, caching and UI result output
+// Uses terrain height cache, flight profile, weather and influence zones
+// Search state combines voxel position and heading direction
+// Validates terrain clearance, aircraft limits, turn radius and blocked zones
+// Supports direct VFR routes, motion primitives, caching and UI result output
 // Outputs route points and debug drawing
 
 #include "FlightPathfinderActor.h"
@@ -17,18 +17,53 @@
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
 
+// Setup pathfinder actor
 AFlightPathfinderActor::AFlightPathfinderActor()
 {
 	// No runtime tick needed
 	PrimaryActorTick.bCanEverTick = false;
 }
 
+// Collect all influence zones from the current level
+void AFlightPathfinderActor::CollectInfluenceZones()
+{
+	// Zone collection can change detour behavior
+	bRoutingDetourObstacleCacheValid = false;
+
+	// Remove old collected references
+	InfluenceZones.Reset();
+
+	if (!GetWorld())
+	{
+		// Cannot collect actors without a world
+		return;
+	}
+
+	for (TActorIterator<AFlightInfluenceZoneActor> It(GetWorld()); It; ++It)
+	{
+		AFlightInfluenceZoneActor* Zone = *It;
+		if (Zone)
+		{
+			// Store zone for route validation
+			InfluenceZones.Add(Zone);
+		}
+	}
+
+	UE_LOG(LogTemp, Display, TEXT("FlightPathfinder: Collected %d influence zones."), InfluenceZones.Num());
+}
+
+// Collect all weather zones from the current level
 void AFlightPathfinderActor::CollectWeatherZones()
 {
+	// Zone collection can change detour behavior
+	bRoutingDetourObstacleCacheValid = false;
+
+	// Remove old collected references
 	WeatherZones.Reset();
 
 	if (!GetWorld())
 	{
+		// Cannot collect actors without a world
 		return;
 	}
 
@@ -37,6 +72,7 @@ void AFlightPathfinderActor::CollectWeatherZones()
 		AFlightWeatherZoneActor* Zone = *It;
 		if (Zone)
 		{
+			// Store zone for route validation
 			WeatherZones.Add(Zone);
 		}
 	}
@@ -81,14 +117,14 @@ bool AFlightPathfinderActor::ValidateReferences() const
 		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: StartActor or GoalActor is missing."));
 		return false;
 	}
-	
+
 	if (FlightProfile->CruiseSpeedMetersPerSecond <= 0.0f)
 	{
 		// Speed is needed to check climb and descent over time
 		UE_LOG(LogTemp, Warning, TEXT("FlightPathfinder: CruiseSpeedMetersPerSecond must be > 0."));
 		return false;
 	}
-	
+
 	if (HeadingBucketCount < 4)
 	{
 		// Too few directions make heading-based search unusable
@@ -158,10 +194,10 @@ void AFlightPathfinderActor::BuildSearchSpace()
 	{
 		HeightCache = GridBaker->HeightCache;
 	}
-	
+
 	if (!HeightCache || !HeightCache->IsValid())
 	{
-		// Cannot build a route space without terrain data
+		// Cannot build route space without terrain data
 		UE_LOG(LogTemp, Warning, TEXT("BuildSearchSpace failed: HeightCache is missing or invalid."));
 		return;
 	}
@@ -176,7 +212,7 @@ void AFlightPathfinderActor::BuildSearchSpace()
 	float MinTerrainZ = TNumericLimits<float>::Max();
 	float MaxTerrainZ = -TNumericLimits<float>::Max();
 
-	// Find the usable terrain height range
+	// Find usable terrain height range
 	for (const float HeightCm : HeightCache->MaxHeightCm)
 	{
 		if (HeightCm <= -1e20f)
@@ -203,16 +239,16 @@ void AFlightPathfinderActor::BuildSearchSpace()
 	float MinRelevantZ = MinTerrainZ;
 	float MaxRelevantZ = MaxTerrainZ;
 
-	// Ensure the start marker is inside the vertical range
 	if (StartActor)
 	{
+		// Ensure start marker is inside vertical range
 		MinRelevantZ = FMath::Min(MinRelevantZ, StartActor->GetActorLocation().Z);
 		MaxRelevantZ = FMath::Max(MaxRelevantZ, StartActor->GetActorLocation().Z);
 	}
 
-	// Ensure the goal marker is inside the vertical range
 	if (GoalActor)
 	{
+		// Ensure goal marker is inside vertical range
 		MinRelevantZ = FMath::Min(MinRelevantZ, GoalActor->GetActorLocation().Z);
 		MaxRelevantZ = FMath::Max(MaxRelevantZ, GoalActor->GetActorLocation().Z);
 	}
@@ -226,21 +262,21 @@ void AFlightPathfinderActor::BuildSearchSpace()
 	SearchMaxWorld.Y = HeightCache->GridMinWorld.Y + (HeightCache->GridSize.Y * HeightCache->CellSizeCm);
 	SearchMaxWorld.Z = MaxRelevantZ + (ExtraTopLayers * VoxelSizeZCm);
 
-	// Keep search space below the aircraft ceiling
 	if (FlightProfile && FlightProfile->MaxAltitudeMetersASL > 0.0f)
 	{
+		// Keep search space below aircraft ceiling
 		const float MaxAllowedWorldZ = HeightCache->SeaLevelWorldZCm + (FlightProfile->MaxAltitudeMetersASL * 100.0f);
 		SearchMaxWorld.Z = FMath::Min(SearchMaxWorld.Z, MaxAllowedWorldZ);
 	}
 
-	// No vertical room remains after altitude ceiling clamp
 	if (SearchMaxWorld.Z <= SearchMinWorld.Z)
 	{
+		// No vertical room remains after altitude ceiling clamp
 		UE_LOG(LogTemp, Warning, TEXT("BuildSearchSpace: No Z-layer within the maximum allowed flight altitude."));
 		ZLayerCount = 0;
 		return;
 	}
-	
+
 	// Convert vertical world range into search layers
 	const float HeightRangeZ = SearchMaxWorld.Z - SearchMinWorld.Z;
 	ZLayerCount = FMath::Max(1, FMath::CeilToInt(HeightRangeZ / VoxelSizeZCm));
@@ -278,7 +314,7 @@ void AFlightPathfinderActor::BuildSearchSpaceForRoute(
 
 	if (VoxelSizeZMeters <= 0.0f)
 	{
-		// Invalid vertical resolution
+		// Vertical layer size must be positive
 		UE_LOG(LogTemp, Warning, TEXT("BuildSearchSpaceForRoute failed: VoxelSizeZMeters must be > 0."));
 		return;
 	}
@@ -314,11 +350,10 @@ void AFlightPathfinderActor::BuildSearchSpaceForRoute(
 	float MinRelevantZ = MinTerrainZ;
 	float MaxRelevantZ = MaxTerrainZ;
 
-	// Include requested start altitude
+	// Include requested endpoint altitudes
 	MinRelevantZ = FMath::Min(MinRelevantZ, StartWorldLocation.Z);
 	MaxRelevantZ = FMath::Max(MaxRelevantZ, StartWorldLocation.Z);
 
-	// Include requested target altitude
 	MinRelevantZ = FMath::Min(MinRelevantZ, TargetWorldLocation.Z);
 	MaxRelevantZ = FMath::Max(MaxRelevantZ, TargetWorldLocation.Z);
 
@@ -330,7 +365,7 @@ void AFlightPathfinderActor::BuildSearchSpaceForRoute(
 	SearchMaxWorld.X = HeightCache->GridMinWorld.X + (HeightCache->GridSize.X * HeightCache->CellSizeCm);
 	SearchMaxWorld.Y = HeightCache->GridMinWorld.Y + (HeightCache->GridSize.Y * HeightCache->CellSizeCm);
 	SearchMaxWorld.Z = MaxRelevantZ + (ExtraTopLayers * VoxelSizeZCm);
-	
+
 	if (FlightProfile && FlightProfile->MaxAltitudeMetersASL > 0.0f)
 	{
 		// Do not search above aircraft maximum altitude
@@ -340,7 +375,7 @@ void AFlightPathfinderActor::BuildSearchSpaceForRoute(
 
 	if (SearchMaxWorld.Z <= SearchMinWorld.Z)
 	{
-		// Requested route is outside the usable altitude range
+		// Requested route is outside usable altitude range
 		UE_LOG(LogTemp, Warning, TEXT("BuildSearchSpaceForRoute: No Z-layer within the maximum allowed flight altitude."));
 		ZLayerCount = 0;
 		return;
@@ -370,76 +405,76 @@ FText AFlightPathfinderActor::GetFailureReasonText(ERouteFailureReason Reason) c
 
 	case ERouteFailureReason::InvalidStart:
 		// Start position cannot be used
-		return FText::FromString(TEXT("Der Startpunkt ist ungültig."));
+		return FText::FromString(TEXT("Starting point is invalid."));
 
 	case ERouteFailureReason::InvalidTarget:
 		// Target position cannot be used
-		return FText::FromString(TEXT("Der Zielpunkt ist ungültig."));
+		return FText::FromString(TEXT("Destination point is invalid."));
 
 	case ERouteFailureReason::InvalidTargetState:
 		// Target could not be mapped to a valid search state
 		return FText::FromString(
-			TEXT("Der Zielzustand ist ungültig oder kann nicht in das Suchraster übernommen werden."));
+			TEXT("The target state is invalid or cannot be included in the search grid."));
 
 	case ERouteFailureReason::InvalidFlightProfile:
 		// Missing or invalid aircraft profile
-		return FText::FromString(TEXT("Kein gültiger Flugzeugtyp ausgewählt."));
+		return FText::FromString(TEXT("No valid aircraft type selected."));
 
 	case ERouteFailureReason::StartAltitudeTooLow:
 		// Start is too close to terrain
-		return FText::FromString(TEXT("Die Starthöhe ist zu niedrig."));
+		return FText::FromString(TEXT("The starting altitude is too low."));
 
 	case ERouteFailureReason::TargetAltitudeTooLow:
 		// Target is too close to terrain
-		return FText::FromString(TEXT("Die Zielhöhe ist zu niedrig."));
+		return FText::FromString(TEXT("The target height is too low."));
 
 	case ERouteFailureReason::TargetAltitudeTooHigh:
 		// Target exceeds aircraft ceiling
-		return FText::FromString(TEXT("Die Zielhöhe liegt über der maximal erlaubten Flughöhe des Flugzeugs."));
+		return FText::FromString(TEXT("The target altitude is above the maximum permitted flight altitude of the aircraft."));
 
 	case ERouteFailureReason::TargetAltitudeNotReachable:
 		// Aircraft cannot reach requested target altitude
-		return FText::FromString(TEXT("Die Zielflughöhe ist mit diesem Flugzeug nicht erreichbar."));
+		return FText::FromString(TEXT("The target altitude cannot be reached with this aircraft."));
 
 	case ERouteFailureReason::TerrainCollision:
 	case ERouteFailureReason::TerrainClearance:
 		// Route violates terrain safety distance
-		return FText::FromString(TEXT("Die Route unterschreitet die nötige Sicherheitsdistanz zum Terrain."));
+		return FText::FromString(TEXT("The route falls below the necessary safety distance to the terrain."));
 
 	case ERouteFailureReason::RestrictedAirspace:
 	case ERouteFailureReason::HardBlockZone:
 		// Route touches blocked airspace
-		return FText::FromString(TEXT("Die Route führt durch eine gesperrte oder blockierte Flugzone."));
+		return FText::FromString(TEXT("The route passes through a restricted or blocked flight zone."));
 
 	case ERouteFailureReason::ClimbLimitExceeded:
 	case ERouteFailureReason::MaxClimbExceeded:
 		// Aircraft cannot climb fast enough
-		return FText::FromString(TEXT("Die notwendige Steigrate überschreitet das Flugzeuglimit."));
+		return FText::FromString(TEXT("The required climb rate exceeds the aircraft's limit."));
 
 	case ERouteFailureReason::DescentLimitExceeded:
 	case ERouteFailureReason::MaxDescentExceeded:
 		// Aircraft cannot descend fast enough
-		return FText::FromString(TEXT("Die notwendige Sinkrate überschreitet das Flugzeuglimit."));
+		return FText::FromString(TEXT("The required descent rate exceeds the aircraft's limit."));
 
 	case ERouteFailureReason::TurnRadiusExceeded:
 	case ERouteFailureReason::TurnRadiusTooSmall:
 		// Turn would be too tight for aircraft
-		return FText::FromString(TEXT("Der benötigte Kurvenradius ist für dieses Flugzeug zu klein."));
+		return FText::FromString(TEXT("The required turning radius is too small for this aircraft."));
 
 	case ERouteFailureReason::NoValidNeighbors:
 		// Search got stuck without valid next states
 		return FText::FromString(
-			TEXT("Keine gültigen Nachbarpunkte gefunden. Die Route ist durch Terrain oder Fluglimits blockiert."));
+			TEXT("No valid neighboring waypoints found. The route is blocked by terrain or flight restrictions."));
 
 	case ERouteFailureReason::SearchLimitReached:
 	case ERouteFailureReason::MaxExpandedStatesReached:
 		// Search stopped before finding a route
-		return FText::FromString(TEXT("Keine Route gefunden. Das maximale Suchlimit wurde erreicht."));
+		return FText::FromString(TEXT("No route found. The maximum search limit has been reached."));
 
 	case ERouteFailureReason::Unknown:
 	default:
 		// Fallback when no specific reason is available
-		return FText::FromString(TEXT("Die Route konnte nicht berechnet werden."));
+		return FText::FromString(TEXT("The route could not be calculated."));
 	}
 }
 
@@ -470,8 +505,11 @@ FVector AFlightPathfinderActor::StateToWorldCenter(const FFlightPathState& State
 }
 
 // Find a safe search state near a world position
-bool AFlightPathfinderActor::WorldToNearestValidState(const FVector& WorldPos, int32 PreferredHeadingIndex,
-                                                      FFlightPathState& OutState) const
+bool AFlightPathfinderActor::WorldToNearestValidState(
+	const FVector& WorldPos,
+	int32 PreferredHeadingIndex,
+	FFlightPathState& OutState
+) const
 {
 	if (!HeightCache || !HeightCache->IsValid() || ZLayerCount <= 0)
 	{
@@ -489,21 +527,21 @@ bool AFlightPathfinderActor::WorldToNearestValidState(const FVector& WorldPos, i
 
 	if (GridX < 0 || GridY < 0 || GridX >= HeightCache->GridSize.X || GridY >= HeightCache->GridSize.Y)
 	{
-		// Position is outside the map grid
+		// Position is outside map grid
 		return false;
 	}
 
 	// Convert vertical voxel size to Unreal units
 	const float VoxelSizeZCm = VoxelSizeZMeters * 100.0f;
 
-	// Start search near the requested height
+	// Start search near requested height
 	int32 StartZ = FMath::FloorToInt((WorldPos.Z - SearchMinWorld.Z) / VoxelSizeZCm);
 	StartZ = FMath::Clamp(StartZ, 0, ZLayerCount - 1);
 
-	// Use a valid heading bucket for the generated state
+	// Use valid heading bucket for generated state
 	const int32 NormalizedHeading = NormalizeHeadingIndex(PreferredHeadingIndex);
 
-	// Prefer a safe state at or above the requested height
+	// Prefer safe state at or above requested height
 	for (int32 Z = StartZ; Z < ZLayerCount; ++Z)
 	{
 		const FFlightPathState Candidate(GridX, GridY, Z, NormalizedHeading);
@@ -530,8 +568,11 @@ bool AFlightPathfinderActor::WorldToNearestValidState(const FVector& WorldPos, i
 }
 
 // Convert a world position directly into a search state
-bool AFlightPathfinderActor::WorldToStateExact(const FVector& WorldPos, int32 HeadingIndex,
-                                               FFlightPathState& OutState) const
+bool AFlightPathfinderActor::WorldToStateExact(
+	const FVector& WorldPos,
+	int32 HeadingIndex,
+	FFlightPathState& OutState
+) const
 {
 	if (!HeightCache || !HeightCache->IsValid() || ZLayerCount <= 0)
 	{
@@ -549,7 +590,7 @@ bool AFlightPathfinderActor::WorldToStateExact(const FVector& WorldPos, int32 He
 
 	if (GridX < 0 || GridY < 0 || GridX >= HeightCache->GridSize.X || GridY >= HeightCache->GridSize.Y)
 	{
-		// Position is outside the grid
+		// Position is outside grid
 		return false;
 	}
 
@@ -606,6 +647,7 @@ bool AFlightPathfinderActor::BuildPrimitiveSamplePoints(
 		// Wrap large positive turn
 		SignedDeltaAngle -= 2.0f * PI;
 	}
+
 	while (SignedDeltaAngle < -PI)
 	{
 		// Wrap large negative turn
@@ -634,17 +676,16 @@ bool AFlightPathfinderActor::BuildPrimitiveSamplePoints(
 
 	// Default movement stays level
 	float TotalDeltaZCm = 0.0f;
+
 	if (VerticalMode > 0)
 	{
 		// Create climbing primitive
-		TotalDeltaZCm = FlightProfile->MaxClimbRateMetersPerSecond * ClimbRateFactor * TravelTimeSeconds *
-			100.0f;
+		TotalDeltaZCm = FlightProfile->MaxClimbRateMetersPerSecond * ClimbRateFactor * TravelTimeSeconds * 100.0f;
 	}
 	else if (VerticalMode < 0)
 	{
 		// Create descending primitive
-		TotalDeltaZCm = -FlightProfile->MaxDescentRateMetersPerSecond * ClimbRateFactor * TravelTimeSeconds *
-			100.0f;
+		TotalDeltaZCm = -FlightProfile->MaxDescentRateMetersPerSecond * ClimbRateFactor * TravelTimeSeconds * 100.0f;
 	}
 
 	// Add first sample at current state
@@ -663,7 +704,7 @@ bool AFlightPathfinderActor::BuildPrimitiveSamplePoints(
 		CurrentWorld.X += FMath::Cos(CurrentAngle) * StepLengthCm;
 		CurrentWorld.Y += FMath::Sin(CurrentAngle) * StepLengthCm;
 
-		// Apply climb/descent smoothly over the primitive
+		// Apply climb/descent smoothly over primitive
 		CurrentWorld.Z = StartWorld.Z + TotalDeltaZCm * Alpha;
 
 		OutSamplePoints.Add(CurrentWorld);
@@ -702,7 +743,7 @@ bool AFlightPathfinderActor::RebuildPrimitiveSamplesBetweenStates(
 
 	int32 EndHeading = 0;
 
-	// Build the same primitive shape again
+	// Build same primitive shape again
 	if (!BuildPrimitiveSamplePoints(
 		FromState,
 		HeadingDeltaBuckets,
@@ -712,7 +753,7 @@ bool AFlightPathfinderActor::RebuildPrimitiveSamplesBetweenStates(
 	{
 		return false;
 	}
-	
+
 	if (OutSamplePoints.Num() > 0)
 	{
 		// Force final sample onto exact target state center
@@ -723,7 +764,7 @@ bool AFlightPathfinderActor::RebuildPrimitiveSamplesBetweenStates(
 	return OutSamplePoints.Num() >= 2;
 }
 
-// Check if the search reached the goal voxel
+// Check if search reached the goal voxel
 bool AFlightPathfinderActor::IsGoalState(const FFlightPathState& Current, const FFlightPathState& Goal) const
 {
 	// Heading is ignored, only position must match
@@ -774,7 +815,7 @@ FIntPoint AFlightPathfinderActor::HeadingIndexToGridStep(int32 HeadingIndex) con
 	return FIntPoint(StepX, StepY);
 }
 
-// Find the closest heading bucket for a 2D direction
+// Find closest heading bucket for a 2D direction
 int32 AFlightPathfinderActor::ComputeNearestHeadingIndexFromDirection(const FVector2D& Direction) const
 {
 	if (Direction.IsNearlyZero())
@@ -805,7 +846,7 @@ int32 AFlightPathfinderActor::GetSmallestHeadingDelta(int32 FromHeading, int32 T
 	const int32 A = NormalizeHeadingIndex(FromHeading);
 	const int32 B = NormalizeHeadingIndex(ToHeading);
 
-	// Check both directions around the heading circle
+	// Check both directions around heading circle
 	const int32 Forward = (B - A + HeadingBucketCount) % HeadingBucketCount;
 	const int32 Backward = (A - B + HeadingBucketCount) % HeadingBucketCount;
 
@@ -905,7 +946,6 @@ float AFlightPathfinderActor::GetAltitudeMetersASLFromWorldZ(float WorldZCm) con
 	// Convert from world centimeters to meters ASL
 	return (WorldZCm - HeightCache->SeaLevelWorldZCm) / 100.0f;
 }
-
 
 // Read terrain altitude at a grid cell
 float AFlightPathfinderActor::GetTerrainHeightMetersASLAtCell(int32 X, int32 Y) const
@@ -1034,7 +1074,7 @@ float AFlightPathfinderActor::GetPreferredTerrainClearanceMeters() const
 		FMath::Max(0.0f, FlightProfile->CruiseSpeedMetersPerSecond) *
 		FMath::Max(0.0f, PreferredClearanceSpeedLookaheadSeconds) *
 		0.2f;
-	
+
 	// Add buffer for wider aircraft turns
 	const float TurnBufferMeters = FMath::Max(0.0f, FlightProfile->MinimumTurnRadiusMeters) * 0.1f;
 
@@ -1089,8 +1129,17 @@ float AFlightPathfinderActor::GetPreferredTerrainSafetyRadiusMeters() const
 // Get movement length used by motion primitives
 float AFlightPathfinderActor::GetEffectivePrimitiveSegmentLengthMeters() const
 {
+	// Check if obstacles need larger route steps
+	const bool bObstacleAwareSearch = HasActiveRoutingDetourObstacles();
+
 	// Start with user-configured minimum length
 	float SegmentLengthMeters = FMath::Max(100.0f, PrimitiveSegmentLengthMeters);
+
+	if (bObstacleAwareSearch)
+	{
+		// Large no-go boxes need longer primitives for useful detours
+		SegmentLengthMeters = FMath::Max(SegmentLengthMeters, ObstacleAwarePrimitiveSegmentLengthMeters);
+	}
 
 	if (FlightProfile && FlightProfile->CruiseSpeedMetersPerSecond > 0.0f)
 	{
@@ -1120,6 +1169,7 @@ float AFlightPathfinderActor::GetEffectivePrimitiveSegmentLengthMeters() const
 			const float DistanceForOneClimbLayer =
 				(VerticalLayerMeters * FlightProfile->CruiseSpeedMetersPerSecond) /
 				(FlightProfile->MaxClimbRateMetersPerSecond * ClimbRateFactor);
+
 			SegmentLengthMeters = FMath::Max(SegmentLengthMeters, DistanceForOneClimbLayer * 1.1f);
 		}
 
@@ -1129,13 +1179,75 @@ float AFlightPathfinderActor::GetEffectivePrimitiveSegmentLengthMeters() const
 			const float DistanceForOneDescentLayer =
 				(VerticalLayerMeters * FlightProfile->CruiseSpeedMetersPerSecond) /
 				(FlightProfile->MaxDescentRateMetersPerSecond * ClimbRateFactor);
+
 			SegmentLengthMeters = FMath::Max(SegmentLengthMeters, DistanceForOneDescentLayer * 1.05f);
 		}
 	}
 
 	// Limit automatic extension of primitive length
-	const float MaxSegmentLengthMeters = FMath::Max(PrimitiveSegmentLengthMeters, MaxAutoPrimitiveSegmentLengthMeters);
+	float MaxSegmentLengthMeters = FMath::Max(PrimitiveSegmentLengthMeters, MaxAutoPrimitiveSegmentLengthMeters);
+	if (bObstacleAwareSearch)
+	{
+		// Obstacle-aware mode must allow its configured minimum step size
+		MaxSegmentLengthMeters = FMath::Max(MaxSegmentLengthMeters, ObstacleAwarePrimitiveSegmentLengthMeters);
+	}
+
 	return FMath::Min(SegmentLengthMeters, MaxSegmentLengthMeters);
+}
+
+// Get A* heuristic weight for current obstacle setup
+float AFlightPathfinderActor::GetEffectiveHeuristicWeight() const
+{
+	// Start with normal A* goal bias
+	float Weight = FMath::Max(1.0f, HeuristicWeight);
+
+	if (HasActiveRoutingDetourObstacles())
+	{
+		// Use stronger goal bias when detour obstacles are active
+		Weight = FMath::Max(Weight, ObstacleAwareHeuristicWeight);
+	}
+
+	return Weight;
+}
+
+// Check if active obstacles need detour-oriented search settings
+bool AFlightPathfinderActor::HasActiveRoutingDetourObstacles() const
+{
+	if (bRoutingDetourObstacleCacheValid)
+	{
+		// Reuse cached obstacle mode during inner search loops
+		return bCachedHasActiveRoutingDetourObstacles;
+	}
+
+	bCachedHasActiveRoutingDetourObstacles = false;
+
+	for (const TObjectPtr<AFlightInfluenceZoneActor>& Zone : InfluenceZones)
+	{
+		if (IsInfluenceZoneActiveForRouting(Zone.Get()) && Zone->bHardBlock)
+		{
+			// Hard influence zones require detour search behavior
+			bCachedHasActiveRoutingDetourObstacles = true;
+			break;
+		}
+	}
+
+	if (!bCachedHasActiveRoutingDetourObstacles)
+	{
+		for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
+		{
+			if (IsWeatherZoneActiveForRouting(Zone.Get()) &&
+				(Zone->IsHardBlock() || Zone->IsScatteredClouds()))
+			{
+				// Weather hazards also require detour search behavior
+				bCachedHasActiveRoutingDetourObstacles = true;
+				break;
+			}
+		}
+	}
+
+	// Store result for repeated calls during this route search
+	bRoutingDetourObstacleCacheValid = true;
+	return bCachedHasActiveRoutingDetourObstacles;
 }
 
 // Convert aircraft ceiling into Unreal world height
@@ -1194,6 +1306,7 @@ bool AFlightPathfinderActor::DoesRouteRespectAltitudeLimit(const TArray<FVector>
 			return false;
 		}
 	}
+
 	return true;
 }
 
@@ -1216,14 +1329,17 @@ bool AFlightPathfinderActor::DoesSegmentRespectAltitudeLimit(const FVector& From
 	const int32 NumSteps = 8;
 	for (int32 Step = 0; Step <= NumSteps; ++Step)
 	{
+		// Move along segment from start to end
 		const float Alpha = static_cast<float>(Step) / static_cast<float>(NumSteps);
 		const FVector Sample = FMath::Lerp(FromWorld, ToWorld, Alpha);
+
 		if (!DoesPointRespectAltitudeLimit(Sample))
 		{
 			// Segment crosses above aircraft ceiling
 			return false;
 		}
 	}
+
 	return true;
 }
 
@@ -1408,7 +1524,7 @@ bool AFlightPathfinderActor::DoesDirectSegmentRespectFlightRules(
 		// Convert bucket difference into turn angle
 		const float AnglePerBucketRad = (2.0f * PI) / static_cast<float>(HeadingBucketCount);
 		const float HeadingDeltaRad = static_cast<float>(HeadingDeltaBuckets) * AnglePerBucketRad;
-		
+
 		if (HeadingDeltaRad > KINDA_SMALL_NUMBER && HorizontalDistanceMeters > KINDA_SMALL_NUMBER)
 		{
 			// Reject if turn would be tighter than aircraft allows
@@ -1421,6 +1537,7 @@ bool AFlightPathfinderActor::DoesDirectSegmentRespectFlightRules(
 			}
 		}
 	}
+
 	return true;
 }
 
@@ -1445,10 +1562,15 @@ bool AFlightPathfinderActor::CanConnectToGoal(
 	// Check distance to snapped grid goal
 	const float GoalStateDistanceMeters = FVector::Distance(CurrentWorld, GoalStateWorld) / 100.0f;
 
+	// Allow larger finish connection around detour obstacles
+	const float GoalConnectionMultiplier = HasActiveRoutingDetourObstacles()
+		? FMath::Max(1.5f, ObstacleAwareGoalConnectionMultiplier)
+		: 1.5f;
+
 	// Allow direct finish only near the goal
 	const float AllowedConnectionMeters = FMath::Max(
 		GoalConnectionToleranceMeters,
-		GetEffectivePrimitiveSegmentLengthMeters() * 1.5f
+		GetEffectivePrimitiveSegmentLengthMeters() * GoalConnectionMultiplier
 	);
 
 	if (GoalXYDistanceMeters > AllowedConnectionMeters && GoalStateDistanceMeters > AllowedConnectionMeters * 1.75f)
@@ -1595,6 +1717,7 @@ bool AFlightPathfinderActor::DoesRouteRespectTurnRadius(const TArray<FVector>& R
 			return false;
 		}
 	}
+
 	return true;
 }
 
@@ -1647,6 +1770,7 @@ bool AFlightPathfinderActor::ValidateCurrentRouteSafety() const
 		// Route corners are not flyable
 		return false;
 	}
+
 	return true;
 }
 
@@ -1660,26 +1784,26 @@ bool AFlightPathfinderActor::IsStateInsideHardBlockZone(const FVector& WorldPoin
 			// Ignore missing zone references
 			continue;
 		}
-		
-		if (Zone->bHardBlock && Zone->ContainsPoint(WorldPoint, AltitudeMetersASL))
+
+		if (IsPointInsideBlockingInfluenceZone(WorldPoint, AltitudeMetersASL))
 		{
-			// Hard block zone cannot be entered
+			// Hard influence zones cannot be entered, including safety buffer
 			return true;
 		}
 	}
 
-	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
+	if (IsPointInsideBlockingWeatherZone(WorldPoint))
 	{
-		if (!Zone || !Zone->IsWeatherEnabled())
-		{
-			continue;
-		}
-
-		if (Zone->IsHardBlock() && Zone->ContainsPoint(WorldPoint))
-		{
-			return true;
-		}
+		// Thunderstorm and fog weather zones cannot be entered
+		return true;
 	}
+
+	if (DoesPointViolateScatteredCloudClearance(WorldPoint))
+	{
+		// Scattered clouds need VFR cloud clearance
+		return true;
+	}
+
 	return false;
 }
 
@@ -1699,45 +1823,64 @@ bool AFlightPathfinderActor::DoesSegmentIntersectHardBlockZone(
 			continue;
 		}
 
-		if (Zone->bHardBlock && Zone->IntersectsSegmentBySampling(FromWorld, ToWorld, FromAltitudeMetersASL,
-		                                                          ToAltitudeMetersASL))
+		if (DoesSegmentIntersectBlockingInfluenceZone(FromWorld, ToWorld, FromAltitudeMetersASL, ToAltitudeMetersASL))
 		{
-			// Segment intersects blocked zone
+			// Segment intersects blocked influence zone, including safety buffer
 			return true;
 		}
 	}
 
-	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
+	if (DoesSegmentIntersectBlockingWeatherZone(FromWorld, ToWorld))
 	{
-		if (!Zone || !Zone->IsWeatherEnabled())
-		{
-			continue;
-		}
-
-		if (Zone->IsHardBlock() && Zone->IntersectsSegmentBySampling(FromWorld, ToWorld))
-		{
-			return true;
-		}
+		// Segment intersects blocking thunderstorm or fog weather
+		return true;
 	}
+
+	if (DoesSegmentViolateScatteredCloudClearance(FromWorld, ToWorld))
+	{
+		// Segment is too close to scattered clouds
+		return true;
+	}
+
 	return false;
 }
 
-bool AFlightPathfinderActor::IsPointInsideBlockingWeatherZone(const FVector& WorldPoint) const
+// Check if influence zone should affect route planning
+bool AFlightPathfinderActor::IsInfluenceZoneActiveForRouting(const AFlightInfluenceZoneActor* Zone) const
 {
-	if (!bUseWeatherZones)
+	if (!Zone)
 	{
+		// Missing zone cannot affect routing
 		return false;
 	}
 
-	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
+	// Influence zones only count when globally enabled and the zone itself is enabled
+	return bUseInfluenceZones && Zone->bInfluenceEnabled;
+}
+
+
+// Check if point enters a blocking influence zone
+bool AFlightPathfinderActor::IsPointInsideBlockingInfluenceZone(
+	const FVector& WorldPoint,
+	float AltitudeMetersASL
+) const
+{
+	for (const TObjectPtr<AFlightInfluenceZoneActor>& Zone : InfluenceZones)
 	{
-		if (!Zone)
+		if (!IsInfluenceZoneActiveForRouting(Zone.Get()) || !Zone->bHardBlock)
 		{
+			// Ignore disabled, missing or soft influence zones
 			continue;
 		}
 
-		if (Zone->IsHardBlock() && Zone->ContainsPoint(WorldPoint))
+		if (Zone->ContainsPointWithClearance(
+			WorldPoint,
+			AltitudeMetersASL,
+			InfluenceZoneHorizontalAvoidanceMeters,
+			InfluenceZoneVerticalAvoidanceMeters
+		))
 		{
+			// Point enters forbidden zone including safety buffer
 			return true;
 		}
 	}
@@ -1745,25 +1888,147 @@ bool AFlightPathfinderActor::IsPointInsideBlockingWeatherZone(const FVector& Wor
 	return false;
 }
 
+// Check if segment crosses a blocking influence zone
+bool AFlightPathfinderActor::DoesSegmentIntersectBlockingInfluenceZone(
+	const FVector& FromWorld,
+	const FVector& ToWorld,
+	float FromAltitudeMetersASL,
+	float ToAltitudeMetersASL
+) const
+{
+	// Use terrain resolution as minimum useful sample spacing
+	const float SampleStepCm = FMath::Max(
+		500.0f,
+		HeightCache ? HeightCache->CellSizeCm * 0.5f : 10000.0f
+	);
+
+	for (const TObjectPtr<AFlightInfluenceZoneActor>& Zone : InfluenceZones)
+	{
+		if (!IsInfluenceZoneActiveForRouting(Zone.Get()) || !Zone->bHardBlock)
+		{
+			// Ignore disabled, missing or soft influence zones
+			continue;
+		}
+
+		if (Zone->IntersectsSegmentWithClearanceBySampling(
+			FromWorld,
+			ToWorld,
+			FromAltitudeMetersASL,
+			ToAltitudeMetersASL,
+			InfluenceZoneHorizontalAvoidanceMeters,
+			InfluenceZoneVerticalAvoidanceMeters,
+			SampleStepCm
+		))
+		{
+			// Segment crosses forbidden zone including safety buffer
+			return true;
+		}
+	}
+
+	return false;
+}
+
+// Check if weather zone should affect route planning
+bool AFlightPathfinderActor::IsWeatherZoneActiveForRouting(const AFlightWeatherZoneActor* Zone) const
+{
+	if (!Zone)
+	{
+		// Missing zone cannot affect routing
+		return false;
+	}
+
+	// Global weather toggle or per-zone enabled state can activate it
+	return bUseWeatherZones || Zone->IsWeatherEnabled();
+}
+
+// Get no-go clearance buffer for hard weather zones
+void AFlightPathfinderActor::GetHardWeatherAvoidanceForZone(
+	const AFlightWeatherZoneActor* Zone,
+	float& OutHorizontalAvoidanceMeters,
+	float& OutVerticalAvoidanceMeters
+) const
+{
+	// Default to no extra avoidance
+	OutHorizontalAvoidanceMeters = 0.0f;
+	OutVerticalAvoidanceMeters = 0.0f;
+
+	if (!Zone)
+	{
+		// No zone type available
+		return;
+	}
+
+	if (Zone->WeatherType == EFlightWeatherType::Thunderstorm)
+	{
+		// Thunderstorms get large avoidance buffers
+		OutHorizontalAvoidanceMeters = ThunderstormHorizontalAvoidanceMeters;
+		OutVerticalAvoidanceMeters = ThunderstormVerticalAvoidanceMeters;
+		return;
+	}
+
+	if (Zone->WeatherType == EFlightWeatherType::Fog)
+	{
+		// Fog blocks lower airspace with smaller buffer
+		OutHorizontalAvoidanceMeters = FogHorizontalAvoidanceMeters;
+		OutVerticalAvoidanceMeters = FogVerticalAvoidanceMeters;
+	}
+}
+
+// Check if point enters blocking weather
+bool AFlightPathfinderActor::IsPointInsideBlockingWeatherZone(const FVector& WorldPoint) const
+{
+	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
+	{
+		if (!IsWeatherZoneActiveForRouting(Zone.Get()) || !Zone->IsHardBlock())
+		{
+			// Ignore inactive or non-blocking weather
+			continue;
+		}
+
+		float HorizontalAvoidanceMeters = 0.0f;
+		float VerticalAvoidanceMeters = 0.0f;
+
+		// Use weather-specific no-go buffer
+		GetHardWeatherAvoidanceForZone(Zone.Get(), HorizontalAvoidanceMeters, VerticalAvoidanceMeters);
+
+		if (Zone->ContainsPointWithClearance(WorldPoint, HorizontalAvoidanceMeters, VerticalAvoidanceMeters))
+		{
+			// Point enters blocking weather including buffer
+			return true;
+		}
+	}
+
+	return false;
+}
+
+// Check if segment crosses blocking weather
 bool AFlightPathfinderActor::DoesSegmentIntersectBlockingWeatherZone(
 	const FVector& FromWorld,
 	const FVector& ToWorld
 ) const
 {
-	if (!bUseWeatherZones)
-	{
-		return false;
-	}
-
 	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
 	{
-		if (!Zone)
+		if (!IsWeatherZoneActiveForRouting(Zone.Get()) || !Zone->IsHardBlock())
 		{
+			// Ignore inactive or non-blocking weather
 			continue;
 		}
 
-		if (Zone->IsHardBlock() && Zone->IntersectsSegmentBySampling(FromWorld, ToWorld))
+		float HorizontalAvoidanceMeters = 0.0f;
+		float VerticalAvoidanceMeters = 0.0f;
+
+		// Use weather-specific no-go buffer
+		GetHardWeatherAvoidanceForZone(Zone.Get(), HorizontalAvoidanceMeters, VerticalAvoidanceMeters);
+
+		if (Zone->IntersectsSegmentWithClearanceBySampling(
+			FromWorld,
+			ToWorld,
+			HorizontalAvoidanceMeters,
+			VerticalAvoidanceMeters
+		))
 		{
+			// Segment crosses blocking weather including buffer
 			return true;
 		}
 	}
@@ -1771,6 +2036,7 @@ bool AFlightPathfinderActor::DoesSegmentIntersectBlockingWeatherZone(
 	return false;
 }
 
+// Get scattered-cloud clearance for current altitude band
 void AFlightPathfinderActor::GetScatteredCloudClearanceForAltitude(
 	float AltitudeMetersASL,
 	float& OutHorizontalClearanceMeters,
@@ -1779,68 +2045,73 @@ void AFlightPathfinderActor::GetScatteredCloudClearanceForAltitude(
 {
 	if (AltitudeMetersASL >= ScatteredCloudFlightLevelThresholdMetersASL)
 	{
+		// Use higher-altitude VFR cloud clearance
 		OutHorizontalClearanceMeters = FMath::Max(0.0f, ScatteredCloudHorizontalClearanceAboveFL100Meters);
 		OutVerticalClearanceMeters = FMath::Max(0.0f, ScatteredCloudVerticalClearanceAboveFL100Meters);
 		return;
 	}
 
+	// Use lower-altitude VFR cloud clearance
 	OutHorizontalClearanceMeters = FMath::Max(0.0f, ScatteredCloudHorizontalClearanceBelowFL100Meters);
 	OutVerticalClearanceMeters = FMath::Max(0.0f, ScatteredCloudVerticalClearanceBelowFL100Meters);
 }
 
+// Check if point violates scattered-cloud clearance
 bool AFlightPathfinderActor::DoesPointViolateScatteredCloudClearance(const FVector& WorldPoint) const
 {
-	if (!bUseWeatherZones)
-	{
-		return false;
-	}
-
+	// Clearance depends on aircraft altitude
 	const float AltitudeMetersASL = GetAltitudeMetersASLFromWorldZ(WorldPoint.Z);
+
 	float HorizontalClearanceMeters = 0.0f;
 	float VerticalClearanceMeters = 0.0f;
+
+	// Select VFR cloud clearance for this altitude
 	GetScatteredCloudClearanceForAltitude(AltitudeMetersASL, HorizontalClearanceMeters, VerticalClearanceMeters);
 
 	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
 	{
-		if (!Zone || !Zone->IsWeatherEnabled() || !Zone->IsScatteredClouds())
+		if (!IsWeatherZoneActiveForRouting(Zone.Get()) || !Zone->IsScatteredClouds())
 		{
+			// Ignore inactive or non-cloud weather
 			continue;
 		}
 
 		if (Zone->ContainsPointWithClearance(WorldPoint, HorizontalClearanceMeters, VerticalClearanceMeters))
 		{
+			// Point is too close to scattered clouds
 			return true;
 		}
 	}
+
 	return false;
 }
 
+// Check if segment violates scattered-cloud clearance
 bool AFlightPathfinderActor::DoesSegmentViolateScatteredCloudClearance(
 	const FVector& FromWorld,
 	const FVector& ToWorld
 ) const
 {
-	if (!bUseWeatherZones)
-	{
-		return false;
-	}
-
+	// Handle zero-length segment as a single point
 	const float DistanceCm = FVector::Distance(FromWorld, ToWorld);
 	if (DistanceCm <= KINDA_SMALL_NUMBER)
 	{
 		return DoesPointViolateScatteredCloudClearance(FromWorld);
 	}
 
+	// Sample long enough steps for cloud clearance checks
 	const float SampleStepCm = FMath::Max(10000.0f, HeightCache ? HeightCache->CellSizeCm : 10000.0f);
 	const int32 NumSteps = FMath::Max(1, FMath::CeilToInt(DistanceCm / SampleStepCm));
 
 	for (int32 Step = 0; Step <= NumSteps; ++Step)
 	{
+		// Check cloud clearance along the segment
 		const float Alpha = static_cast<float>(Step) / static_cast<float>(NumSteps);
 		const FVector SamplePoint = FMath::Lerp(FromWorld, ToWorld, Alpha);
 
 		if (DoesPointViolateScatteredCloudClearance(SamplePoint))
 		{
+			// Segment comes too close to scattered clouds
 			return true;
 		}
 	}
@@ -1856,17 +2127,23 @@ float AFlightPathfinderActor::GetSoftZoneTraversalCost(
 	float ToAltitudeMetersASL
 ) const
 {
+	if (!bUseInfluenceZones)
+	{
+		// Soft zones are ignored when influence routing is disabled
+		return 0.0f;
+	}
+
 	// Collect all soft-zone penalties along segment
 	float TotalExtraCost = 0.0f;
 
 	for (const TObjectPtr<AFlightInfluenceZoneActor>& Zone : InfluenceZones)
 	{
-		if (!Zone)
+		if (!IsInfluenceZoneActiveForRouting(Zone.Get()))
 		{
-			// Ignore missing zone references
+			// Ignore inactive or missing zones
 			continue;
 		}
-		
+
 		if (!Zone->bHardBlock && Zone->AdditionalTraversalCost > 0.0f)
 		{
 			// Soft zone is allowed but should be avoided if possible
@@ -1918,6 +2195,7 @@ bool AFlightPathfinderActor::IsStateValid(const FFlightPathState& State) const
 		// State lies inside forbidden airspace
 		return false;
 	}
+
 	return true;
 }
 
@@ -1953,6 +2231,7 @@ bool AFlightPathfinderActor::DoesSegmentRespectTerrainClearance(const FVector& F
 			return false;
 		}
 	}
+
 	return true;
 }
 
@@ -1976,7 +2255,7 @@ bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, con
 	// Convert both states to world positions for safety checks
 	const FVector FromWorld = StateToWorldCenter(From);
 	const FVector ToWorld = StateToWorldCenter(To);
-	
+
 	if (!DoesSegmentRespectTerrainClearance(FromWorld, ToWorld))
 	{
 		// Movement path is too close to terrain
@@ -1988,7 +2267,7 @@ bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, con
 	// Convert endpoint heights for airspace checks
 	const float FromAltitudeMetersASL = GetAltitudeMetersASLFromWorldZ(FromWorld.Z);
 	const float ToAltitudeMetersASL = GetAltitudeMetersASLFromWorldZ(ToWorld.Z);
-	
+
 	if (DoesSegmentIntersectHardBlockZone(FromWorld, ToWorld, FromAltitudeMetersASL, ToAltitudeMetersASL))
 	{
 		// Movement path crosses blocked airspace
@@ -2059,6 +2338,7 @@ bool AFlightPathfinderActor::IsTransitionValid(const FFlightPathState& From, con
 			}
 		}
 	}
+
 	return true;
 }
 
@@ -2081,12 +2361,13 @@ bool AFlightPathfinderActor::ApplyMotionPrimitive(
 
 	// Use the primitive end point as next state target
 	const FVector EndWorld = SamplePoints.Last();
-	
+
 	if (!WorldToStateExact(EndWorld, EndHeading, OutState))
 	{
 		// Primitive ended outside usable search grid
 		return false;
 	}
+
 	return true;
 }
 
@@ -2131,7 +2412,7 @@ bool AFlightPathfinderActor::IsMotionPrimitiveValid(
 		LastFailureReason = ERouteFailureReason::InvalidTargetState;
 		return false;
 	}
-	
+
 	// Force last sample to exact target state center
 	SamplePoints.Last() = StateToWorldCenter(ToState);
 
@@ -2236,6 +2517,7 @@ bool AFlightPathfinderActor::IsMotionPrimitiveValid(
 			}
 		}
 	}
+
 	return true;
 }
 
@@ -2245,16 +2527,23 @@ void AFlightPathfinderActor::GetNeighbors(const FFlightPathState& Current, TArra
 	// Clear previous neighbor list
 	OutNeighbors.Reset();
 
-	// Avoid duplicate states from different primitive combinations
-	TSet<FFlightPathState> UniqueNeighbors;
+	// Reserve common maximum to avoid repeated allocations
+	OutNeighbors.Reserve(24);
 
 	// Start with straight movement
-	TArray<int32> HeadingOptions;
+	TArray<int32, TInlineAllocator<7>> HeadingOptions;
 	HeadingOptions.Add(0);
-	
+
+	// Use wider turn options around detour obstacles
+	int32 EffectiveTurnBuckets = PrimitiveTurnDeltaBuckets;
+	if (HasActiveRoutingDetourObstacles())
+	{
+		EffectiveTurnBuckets = FMath::Max(EffectiveTurnBuckets, ObstacleAwareTurnDeltaBuckets);
+	}
+
 	// Limit how much the aircraft may turn per step
 	const int32 MaxTurnBuckets = FMath::Clamp(
-		FMath::Max(1, FMath::Max(MaxHeadingChangePerStep, PrimitiveTurnDeltaBuckets)),
+		FMath::Max(1, FMath::Max(MaxHeadingChangePerStep, EffectiveTurnBuckets)),
 		1,
 		3
 	);
@@ -2267,7 +2556,7 @@ void AFlightPathfinderActor::GetNeighbors(const FFlightPathState& Current, TArra
 	}
 
 	// Start with level flight
-	TArray<int32> VerticalModes;
+	TArray<int32, TInlineAllocator<3>> VerticalModes;
 	VerticalModes.Add(0);
 
 	if (bAllowClimbStep)
@@ -2287,6 +2576,7 @@ void AFlightPathfinderActor::GetNeighbors(const FFlightPathState& Current, TArra
 		for (const int32 VerticalMode : VerticalModes)
 		{
 			FFlightPathState Candidate;
+
 			if (!ApplyMotionPrimitive(Current, HeadingDelta, VerticalMode, Candidate))
 			{
 				// Primitive cannot produce a usable candidate
@@ -2306,12 +2596,9 @@ void AFlightPathfinderActor::GetNeighbors(const FFlightPathState& Current, TArra
 			}
 
 			// Store only valid and unique neighbors
-			UniqueNeighbors.Add(Candidate);
+			OutNeighbors.AddUnique(Candidate);
 		}
 	}
-
-	// Return generated neighbors to A*
-	OutNeighbors = UniqueNeighbors.Array();
 
 	if (OutNeighbors.Num() == 0)
 	{
@@ -2327,7 +2614,7 @@ float AFlightPathfinderActor::HeuristicCost(const FFlightPathState& A, const FFl
 	// Compare states in world space
 	const FVector AWorld = StateToWorldCenter(A);
 	const FVector BWorld = StateToWorldCenter(B);
-	
+
 	// Use straight-line distance as optimistic estimate
 	const float StraightLineDistanceMeters = FVector::Distance(AWorld, BWorld) / 100.0f;
 
@@ -2357,10 +2644,10 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 	// Convert states to world positions for distance and safety cost
 	const FVector FromWorld = StateToWorldCenter(From);
 	const FVector ToWorld = StateToWorldCenter(To);
-	
+
 	// Use 3D path length for base travel cost
 	const float PathLengthMeters = FVector::Distance(FromWorld, ToWorld) / 100.0f;
-	
+
 	// Use horizontal distance for jitter and flight behavior checks
 	const float HorizontalDistanceMeters = FVector2D::Distance(
 		FVector2D(FromWorld.X, FromWorld.Y),
@@ -2383,21 +2670,22 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 	// Add penalty when crossing soft influence zones
 	Cost += GetSoftZoneTraversalCost(FromWorld, ToWorld, FromAltitudeMetersASL, ToAltitudeMetersASL);
 
-
 	// Penalize climbs so the search plans altitude changes earlier
 	const float DeltaZMeters = (ToWorld.Z - FromWorld.Z) / 100.0f;
 	if (DeltaZMeters > 0.0f)
 	{
 		const float ClimbPenalty =
 			(DeltaZMeters / FMath::Max(0.1f, FlightProfile->MaxClimbRateMetersPerSecond)) * 25.0f;
+
 		Cost += ClimbPenalty;
 	}
-	
+
 	if (DeltaZMeters < 0.0f)
 	{
 		// Penalize descents less than climbs, but avoid nervous altitude changes
 		const float DescentPenalty =
 			(FMath::Abs(DeltaZMeters) / FMath::Max(0.1f, FlightProfile->MaxDescentRateMetersPerSecond)) * 8.0f;
+
 		Cost += DescentPenalty;
 	}
 
@@ -2407,7 +2695,9 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 	{
 		const float TurnPenalty =
 			static_cast<float>(HeadingDeltaBuckets * HeadingDeltaBuckets) *
-			(FMath::Max(1.0f, FlightProfile->MinimumTurnRadiusMeters) / FMath::Max(50.0f, GetEffectivePrimitiveSegmentLengthMeters())) * 25.0f;
+			(FMath::Max(1.0f, FlightProfile->MinimumTurnRadiusMeters) /
+				FMath::Max(50.0f, GetEffectivePrimitiveSegmentLengthMeters())) *
+			25.0f;
 
 		Cost += TurnPenalty;
 	}
@@ -2423,7 +2713,11 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 		const FVector Sample = FMath::Lerp(FromWorld, ToWorld, Alpha);
 
 		float TerrainHeightCm = 0.0f;
-		if (GetConservativeTerrainHeightCmAtWorldXY(Sample.X, Sample.Y, GetPreferredTerrainSafetyRadiusMeters(), TerrainHeightCm))
+		if (GetConservativeTerrainHeightCmAtWorldXY(
+			Sample.X,
+			Sample.Y,
+			GetPreferredTerrainSafetyRadiusMeters(),
+			TerrainHeightCm))
 		{
 			// Compare aircraft height with conservative terrain height
 			const float SampleAltitudeMetersASL = GetAltitudeMetersASLFromWorldZ(Sample.Z);
@@ -2453,13 +2747,14 @@ float AFlightPathfinderActor::TransitionCost(const FFlightPathState& From, const
 	{
 		const float CeilingMarginMeters = (MaxAllowedWorldZCm - ToWorld.Z) / 100.0f;
 		const float PreferredCeilingMarginMeters = FMath::Max(GetRequiredTerrainClearanceMeters(), VoxelSizeZMeters);
+
 		if (CeilingMarginMeters < PreferredCeilingMarginMeters)
 		{
 			// Keep route away from the altitude ceiling if possible
 			Cost += (PreferredCeilingMarginMeters - CeilingMarginMeters) * 40.0f;
 		}
 	}
-	
+
 	if (HorizontalDistanceMeters < GetEffectivePrimitiveSegmentLengthMeters() * 0.5f)
 	{
 		// Discourage tiny movement steps that create jitter
@@ -2483,7 +2778,7 @@ bool AFlightPathfinderActor::IsTransitionValidCached(const FFlightPathState& Fro
 
 	// Validate transition only once
 	const bool bValid = IsTransitionValid(From, To);
-	
+
 	// Store result for future checks
 	TransitionValidityCache.Add(Key, bValid);
 	return bValid;
@@ -2535,7 +2830,7 @@ float AFlightPathfinderActor::CalculateTurnReversalPenalty(
 		// Interpret next turn as negative wrapped direction
 		SignedNextTurn -= HeadingBucketCount;
 	}
-	
+
 	if (SignedPrevTurn == 0 || SignedNextTurn == 0)
 	{
 		// Straight movement is not a reversal
@@ -2577,13 +2872,13 @@ bool AFlightPathfinderActor::PopBestOpenStateFromHeap(
 			// Entry no longer has valid node data
 			continue;
 		}
-		
+
 		if (Record->bClosed)
 		{
 			// State was already fully processed
 			continue;
 		}
-		
+
 		if (!FMath::IsNearlyEqual(Record->F, BestEntry.FScore, KINDA_SMALL_NUMBER))
 		{
 			// Heap entry is outdated after a better path was found
@@ -2667,6 +2962,7 @@ void AFlightPathfinderActor::CompactCurrentRouteWaypoints()
 
 		// Fallback keeps the next original waypoint
 		int32 BestNextIndex = CurrentIndex + 1;
+
 		for (int32 TestIndex = MaxTestIndex; TestIndex > CurrentIndex + 1; --TestIndex)
 		{
 			// Test if a later waypoint can be reached directly
@@ -2680,7 +2976,7 @@ void AFlightPathfinderActor::CompactCurrentRouteWaypoints()
 				// Skip replacement if spacing would still be too small
 				continue;
 			}
-			
+
 			// Use direct segment heading for safety validation
 			const FVector2D SegmentDirection(
 				CurrentRouteWorldPoints[TestIndex].X - CurrentRouteWorldPoints[CurrentIndex].X,
@@ -2691,7 +2987,10 @@ void AFlightPathfinderActor::CompactCurrentRouteWaypoints()
 			// Avoid replacing too much route structure at once
 			const float MaxCompactSegmentMeters = FMath::Max(
 				MinOutputWaypointSpacingMeters * 4.0f,
-				FMath::Max(GetEffectivePrimitiveSegmentLengthMeters() * 4.0f, FlightProfile ? FlightProfile->MinimumTurnRadiusMeters * 4.0f : 0.0f)
+				FMath::Max(
+					GetEffectivePrimitiveSegmentLengthMeters() * 4.0f,
+					FlightProfile ? FlightProfile->MinimumTurnRadiusMeters * 4.0f : 0.0f
+				)
 			);
 
 			if (TestIndex != LastIndex && DistanceMeters > MaxCompactSegmentMeters)
@@ -2709,6 +3008,7 @@ void AFlightPathfinderActor::CompactCurrentRouteWaypoints()
 				TurnProbe.Add(CompactRoute[CompactRoute.Num() - 2]);
 				TurnProbe.Add(CurrentRouteWorldPoints[CurrentIndex]);
 				TurnProbe.Add(CurrentRouteWorldPoints[TestIndex]);
+
 				bTurnAtCurrentWaypointIsFlyable = DoesRouteRespectTurnRadius(TurnProbe);
 			}
 
@@ -2758,6 +3058,7 @@ float AFlightPathfinderActor::CalculateRouteLengthMeters() const
 		// Convert Unreal centimeters to meters
 		TotalLengthMeters += SegmentLengthCm / 100.0f;
 	}
+
 	return TotalLengthMeters;
 }
 
@@ -2803,6 +3104,7 @@ float AFlightPathfinderActor::CalculateTotalClimbMeters() const
 			TotalClimbMeters += DeltaMeters;
 		}
 	}
+
 	return TotalClimbMeters;
 }
 
@@ -2818,6 +3120,7 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 	OutRoutePoints.Reset();
 
 	// Remove old route and cached search data
+	bRoutingDetourObstacleCacheValid = false;
 	CurrentRouteWorldPoints.Reset();
 	TransitionValidityCache.Reset();
 	TransitionCostCache.Reset();
@@ -2851,16 +3154,48 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 		return false;
 	}
 
-	if (bUseWeatherZones)
+	// Always collect static zones before route validation
+	CollectInfluenceZones();
+	CollectWeatherZones();
+
+	int32 HardInfluenceZoneCount = 0;
+	for (const TObjectPtr<AFlightInfluenceZoneActor>& Zone : InfluenceZones)
 	{
-		// Refresh static weather zone list for this search
-		CollectWeatherZones();
+		if (IsInfluenceZoneActiveForRouting(Zone.Get()) && Zone->bHardBlock)
+		{
+			// Count active hard influence zones for debug output
+			++HardInfluenceZoneCount;
+		}
 	}
-	else
+
+
+	// Log influence-zone routing setup
+	UE_LOG(LogTemp, Display,
+		TEXT("FlightPathfinder influence routing: Active=%s, HardZones=%d, CollectedZones=%d, HorizontalBuffer=%.1fm, VerticalBuffer=%.1fm"),
+		bUseInfluenceZones ? TEXT("true") : TEXT("false"),
+		HardInfluenceZoneCount,
+		InfluenceZones.Num(),
+		InfluenceZoneHorizontalAvoidanceMeters,
+		InfluenceZoneVerticalAvoidanceMeters
+	);
+
+	int32 EnabledWeatherZoneCount = 0;
+	for (const TObjectPtr<AFlightWeatherZoneActor>& Zone : WeatherZones)
 	{
-		// Weather is disabled in UI/editor options and must not affect routing
-		WeatherZones.Reset();
+		if (Zone && Zone->IsWeatherEnabled())
+		{
+			// Count manually enabled weather zones for debug output
+			++EnabledWeatherZoneCount;
+		}
 	}
+
+	// Log weather-zone routing setup
+	UE_LOG(LogTemp, Display,
+		TEXT("FlightPathfinder weather routing: Global=%s, EnabledZones=%d, CollectedZones=%d"),
+		bUseWeatherZones ? TEXT("true") : TEXT("false"),
+		EnabledWeatherZoneCount,
+		WeatherZones.Num()
+	);
 
 	// Log aircraft values used for this route
 	UE_LOG(LogTemp, Display,
@@ -2898,18 +3233,20 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 				StartAltitudeMetersASL,
 				FlightProfile->MaxAltitudeMetersASL
 			);
+
 			LastFailureReason = ERouteFailureReason::InvalidStart;
 			return false;
 		}
 
 		if (GoalAltitudeMetersASL > FlightProfile->MaxAltitudeMetersASL)
 		{
-			// Reject start above aircraft ceiling
+			// Reject target above aircraft ceiling
 			UE_LOG(LogTemp, Warning,
 				TEXT("FindFlightRoute aborted: Target altitude %.2f m ASL is above the maximum flight altitude %.2f m ASL."),
 				GoalAltitudeMetersASL,
 				FlightProfile->MaxAltitudeMetersASL
 			);
+
 			LastFailureReason = ERouteFailureReason::TargetAltitudeTooHigh;
 			return false;
 		}
@@ -2931,6 +3268,22 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 		return false;
 	}
 
+	if (IsStateInsideHardBlockZone(StartPos, StartAltitudeMetersASL))
+	{
+		// Reject start inside active weather or influence no-fly zone
+		UE_LOG(LogTemp, Warning, TEXT("FindFlightRoute aborted: Starting point is inside an active no-fly zone."));
+		LastFailureReason = ERouteFailureReason::InvalidStart;
+		return false;
+	}
+
+	if (IsStateInsideHardBlockZone(GoalPos, GoalAltitudeMetersASL))
+	{
+		// Reject goal inside active weather or influence no-fly zone
+		UE_LOG(LogTemp, Warning, TEXT("FindFlightRoute aborted: Target point is inside an active no-fly zone."));
+		LastFailureReason = ERouteFailureReason::InvalidTarget;
+		return false;
+	}
+
 	TArray<FVector> DirectRoute;
 	if (TryBuildDirectVfrRoute(StartPos, GoalPos, StartHeading, DirectRoute))
 	{
@@ -2947,6 +3300,7 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 			// Draw direct route in level
 			DebugDrawCurrentRoute();
 		}
+
 		return true;
 	}
 
@@ -2964,6 +3318,7 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 		LastFailureReason = ERouteFailureReason::Unknown;
 		return false;
 	}
+
 	FFlightPathState StartState;
 	FFlightPathState GoalState;
 
@@ -2998,7 +3353,7 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 		LastFailureReason = ERouteFailureReason::InvalidTargetState;
 		return false;
 	}
-	
+
 	// Open states waiting for A* expansion
 	TArray<FFlightOpenEntry> OpenHeap;
 
@@ -3008,8 +3363,10 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 	// Initialize A* at start state
 	FFlightPathNodeRecord StartRecord;
 	StartRecord.G = 0.0f;
+	const float EffectiveHeuristicWeight = GetEffectiveHeuristicWeight();
+
 	StartRecord.H = HeuristicCost(StartState, GoalState);
-	StartRecord.F = StartRecord.G + HeuristicWeight * StartRecord.H;
+	StartRecord.F = StartRecord.G + EffectiveHeuristicWeight * StartRecord.H;
 	StartRecord.bHasParent = false;
 	StartRecord.bClosed = false;
 
@@ -3024,6 +3381,10 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 	int32 ExpandedCount = 0;
 	const int32 MaxExpandedStates = FMath::Max(10000, SearchMaxExpandedStates);
 	bool bFoundRoute = false;
+
+	// Reuse neighbor storage to avoid allocations in the A* loop
+	TArray<FFlightPathState> Neighbors;
+	Neighbors.Reserve(24);
 
 	// Store the state where route search finished
 	FFlightPathState ReachedGoalState;
@@ -3059,7 +3420,7 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 
 		// Keep current path cost for neighbor updates
 		const float CurrentG = CurrentRecord->G;
-		
+
 		if (bDrawVisitedStates && GetWorld())
 		{
 			// Optional debug draw for explored search states
@@ -3080,9 +3441,8 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 			ReachedGoalState = Current;
 			break;
 		}
-		
+
 		// Generate aircraft-valid next states
-		TArray<FFlightPathState> Neighbors;
 		GetNeighbors(Current, Neighbors);
 
 		for (const FFlightPathState& Neighbor : Neighbors)
@@ -3098,7 +3458,7 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 			float TentativeG = CurrentG + TransitionCostCached(Current, Neighbor);
 
 			bool bShouldUpdate = false;
-			
+
 			if (!ExistingRecord)
 			{
 				// First time this neighbor is reached
@@ -3122,7 +3482,7 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 			// Store best known path to neighbor
 			ExistingRecord->G = TentativeG;
 			ExistingRecord->H = HeuristicCost(Neighbor, GoalState);
-			ExistingRecord->F = ExistingRecord->G + HeuristicWeight * ExistingRecord->H;
+			ExistingRecord->F = ExistingRecord->G + EffectiveHeuristicWeight * ExistingRecord->H;
 			ExistingRecord->Parent = Current;
 			ExistingRecord->bHasParent = true;
 			ExistingRecord->bClosed = false;
@@ -3162,6 +3522,7 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 		       FailureStats.InvalidTargetStateCount,
 		       FailureStats.NoValidNeighborsCount
 		);
+
 		return false;
 	}
 
@@ -3200,7 +3561,7 @@ bool AFlightPathfinderActor::RunFlightRouteSearch(
 	const float RouteLengthMeters = CalculateRouteLengthMeters();
 	const float NetAltitudeChangeMeters = CalculateNetAltitudeChangeMeters();
 	const float TotalClimbMeters = CalculateTotalClimbMeters();
-	
+
 	// Log successful route summary
 	UE_LOG(
 		LogTemp,
@@ -3244,7 +3605,7 @@ FRouteCalculationResult AFlightPathfinderActor::CalculateFlightRouteForUI(
 	TransitionCostCache.Reset();
 	ConservativeTerrainHeightCache.Reset();
 	FailureStats.Reset();
-	
+
 	// Reset status from previous calculation
 	LastFailureReason = ERouteFailureReason::None;
 	LastExpandedStates = 0;
@@ -3296,7 +3657,11 @@ FRouteCalculationResult AFlightPathfinderActor::CalculateFlightRouteForUI(
 		Result.bSuccess = false;
 		Result.FailureReason = ERouteFailureReason::InvalidStart;
 		LastFailureReason = Result.FailureReason;
-		Result.FailureText = FText::Format(FText::FromString(TEXT("Die Starthoehe ({0}m ASL) liegt ueber der maximal erlaubten Flughoehe dieses Flugzeugs ({1}m ASL).")), FText::AsNumber(StartAltitudeMetersASL), FText::AsNumber(InFlightProfile->MaxAltitudeMetersASL));
+		Result.FailureText = FText::Format(
+			FText::FromString(TEXT("The take-off altitude ({0}m ASL) is above the maximum permitted flight altitude of this aircraft ({1}m ASL).")),
+			FText::AsNumber(StartAltitudeMetersASL),
+			FText::AsNumber(InFlightProfile->MaxAltitudeMetersASL)
+		);
 		return Result;
 	}
 
@@ -3310,7 +3675,7 @@ FRouteCalculationResult AFlightPathfinderActor::CalculateFlightRouteForUI(
 		Result.FailureText = GetFailureReasonText(Result.FailureReason);
 		return Result;
 	}
-	
+
 	if (!HeightCache)
 	{
 		if (GridBaker && GridBaker->HeightCache)
@@ -3326,13 +3691,13 @@ FRouteCalculationResult AFlightPathfinderActor::CalculateFlightRouteForUI(
 		Result.bSuccess = false;
 		Result.FailureReason = ERouteFailureReason::Unknown;
 		LastFailureReason = Result.FailureReason;
-		Result.FailureText = FText::FromString(TEXT("HeightCache fehlt."));
+		Result.FailureText = FText::FromString(TEXT("HeightCache missing."));
 		return Result;
 	}
 
 	// Convert UI start altitude from meters ASL to world Z centimeters
 	StartWorldLocation.Z = HeightCache->SeaLevelWorldZCm + (StartAltitudeMetersASL * 100.0f);
-	
+
 	// Convert UI target altitude from meters ASL to world Z centimeters
 	TargetWorldLocation.Z = HeightCache->SeaLevelWorldZCm + (TargetAltitudeMetersASL * 100.0f);
 
@@ -3363,7 +3728,7 @@ FRouteCalculationResult AFlightPathfinderActor::CalculateFlightRouteForUI(
 		{
 			// Fallback if search failed without specific reason
 			Result.FailureReason = ERouteFailureReason::Unknown;
-		LastFailureReason = Result.FailureReason;
+			LastFailureReason = Result.FailureReason;
 		}
 
 		// Convert failure reason to UI text
@@ -3479,5 +3844,6 @@ void AFlightPathfinderActor::ClearCurrentRoute()
 		FlushDebugStrings(GetWorld());
 	}
 
+	// Log manual route clear action
 	UE_LOG(LogTemp, Display, TEXT("The current flight route has been cleared."));
 }
