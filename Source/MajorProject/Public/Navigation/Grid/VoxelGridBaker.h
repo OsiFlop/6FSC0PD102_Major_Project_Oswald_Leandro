@@ -42,6 +42,14 @@ public:
 	UPROPERTY(VisibleAnywhere, Category="Grid")
 	FVector GridMaxWorld = FVector::ZeroVector;
 
+	// Real landscape minimum world-space corner (XY), before padding is added
+	UPROPERTY(VisibleAnywhere, Category="Grid")
+	FVector LandscapeMinWorld = FVector::ZeroVector;
+
+	// Real landscape maximum world-space corner (XY), before padding is added
+	UPROPERTY(VisibleAnywhere, Category="Grid")
+	FVector LandscapeMaxWorld = FVector::ZeroVector;
+
 	// Grid resolution in cells (X,Y)
 	UPROPERTY(VisibleAnywhere, Category="Grid")
 	FIntPoint GridSize = FIntPoint(0, 0);

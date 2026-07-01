@@ -68,6 +68,10 @@ void AVoxelGridBaker::BuildGrid()
 	// Optional padding around landscape bounds
 	const float PaddingCm = GridConfig->PaddingMeters * 100.0f;
 
+	// Keep unpadded landscape bounds for route validity checks
+	LandscapeMinWorld = FVector(LMin.X, LMin.Y, 0.0f);
+	LandscapeMaxWorld = FVector(LMax.X, LMax.Y, 0.0f);
+
 	// Grid XY covers padded landscape area
 	GridMinWorld = FVector(LMin.X - PaddingCm, LMin.Y - PaddingCm, 0.0f);
 	GridMaxWorld = FVector(LMax.X + PaddingCm, LMax.Y + PaddingCm, 0.0f);
@@ -181,6 +185,8 @@ void AVoxelGridBaker::BakeMaxHeights()
 
 	// Init cache metadata + storage
 	HeightCache->GridMinWorld = GridMinWorld;
+	HeightCache->LandscapeMinWorld = LandscapeMinWorld;
+	HeightCache->LandscapeMaxWorld = LandscapeMaxWorld;
 	HeightCache->CellSizeCm = CellSizeCm;
 	HeightCache->Allocate(GridSize.X, GridSize.Y);
 

@@ -45,6 +45,7 @@ enum class ERouteFailureReason : uint8
 
 	SearchLimitReached UMETA(DisplayName = "Search Limit Reached"),
 	MaxExpandedStatesReached UMETA(DisplayName = "Max Expanded States Reached"),
+	RouteTooLong UMETA(DisplayName = "Route Too Long"),
 
 	Unknown UMETA(DisplayName = "Unknown")
 };

@@ -320,12 +320,13 @@ public:
 	float ShortPrimitiveLengthMultiplier = 0.55f;
 
 	// Long movement multiplier for early detours and early climb planning
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model|Adaptive Search", meta=(ClampMin="1.0", ClampMax="3.0"))
-	float LongPrimitiveLengthMultiplier = 1.75f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model|Adaptive Search", meta=(ClampMin="1.0", ClampMax="6.0"))
+	float LongPrimitiveLengthMultiplier = 3.0f;
 
-	// Optional extra-long movement used only when obstacle-aware routing is active
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model|Adaptive Search", meta=(ClampMin="1.0", ClampMax="4.0"))
-	float ObstacleAwareLongPrimitiveLengthMultiplier = 2.25f;
+	// Optional extra-long movement used only when obstacle-aware routing is active.
+	// Kept small enough to fit the ~16km x 12km map without overshooting the grid edge.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model|Adaptive Search", meta=(ClampMin="1.0", ClampMax="10.0"))
+	float ObstacleAwareLongPrimitiveLengthMultiplier = 2.5f;
 
 	// Maximum direction change per search step
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="0", ClampMax="4"))
@@ -379,17 +380,58 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
 	int32 ZLayerCount = 0;
 
+	// Highest baked terrain height (world Z, cm) near the direct start-target line, for HeuristicCost
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
+	float RouteTerrainPeakWorldZ = 0.0f;
+
+	// Current XY search corridor minimum column in terrain grid cell indices
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
+	int32 SearchMinGridX = 0;
+
+	// Current XY search corridor minimum row in terrain grid cell indices
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
+	int32 SearchMinGridY = 0;
+
+	// Current XY search corridor maximum column in terrain grid cell indices (exclusive)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
+	int32 SearchMaxGridX = 0;
+
+	// Current XY search corridor maximum row in terrain grid cell indices (exclusive)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Search Space")
+	int32 SearchMaxGridY = 0;
+
 	// A* goal bias, higher is faster but less optimal
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="1.0"))
-	float HeuristicWeight = 1.0f;
+	float HeuristicWeight = 1.5f;
 
 	// Minimum A* goal bias when obstacles are active
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="1.0"))
-	float ObstacleAwareHeuristicWeight = 1.2f;
+	float ObstacleAwareHeuristicWeight = 2.0f;
 
 	// Hard limit for A* search work
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="10000"))
 	int32 SearchMaxExpandedStates = 1500000;
+
+	// Reject a found route longer than this multiple of the straight-line start-goal distance
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="1.0"))
+	float MaxRouteLengthToStraightLineRatio = 16.0f;
+
+	// Minimum allowed route length regardless of the ratio above
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="0.0"))
+	float MinAcceptableRouteLengthMeters = 3000.0f;
+
+	// Minimum horizontal padding around start/goal for the first search attempt
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="500.0"))
+	float SearchCorridorMinPaddingMeters = 3000.0f;
+
+	// Extra corridor padding relative to the straight-line start-goal distance
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="0.0"))
+	float SearchCorridorPaddingRatio = 0.5f;
+
+	// How many times the search corridor doubles before falling back to the full map.
+	// Keeps short routes fast while still guaranteeing the full map is tried for hard routes.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="0", ClampMax="6"))
+	int32 MaxSearchCorridorWideningAttempts = 3;
 
 	// Distance where direct goal connection may be accepted
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Search Space", meta=(ClampMin="0.0"))
@@ -425,17 +467,20 @@ public:
 	float MinOutputWaypointSpacingMeters = 300.0f;
 
 	// Maximum points tested during waypoint simplification
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Result", meta=(ClampMin="2", ClampMax="64"))
-	int32 MaxOutputWaypointCompactionLookahead = 6;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Result", meta=(ClampMin="2", ClampMax="2048"))
+	int32 MaxOutputWaypointCompactionLookahead = 512;
 
 	// Enable waypoint simplification after A*.
-	// Keep this disabled while testing route correctness because aggressive compaction can create sharp corners.
+	// Each candidate shortcut is re-validated against the same safety checks as any other segment.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Result")
-	bool bUseWaypointCompaction = false;
-	
+	bool bUseWaypointCompaction = true;
+
 	// Final route as world-space positions
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Result")
 	TArray<FVector> CurrentRouteWorldPoints;
+
+	// A* states behind CurrentRouteWorldPoints, one per waypoint, before compaction
+	TArray<FFlightPathState> CurrentRouteStates;
 
 	// Number of states checked in last search
 	UPROPERTY(BlueprintReadOnly, Category = "Flight Pathfinding|Debug")
@@ -490,8 +535,8 @@ public:
 	int32 PrimitiveTurnDeltaBuckets = 1;
 
 	// Wider turn options when routing around blocked zones
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="1", ClampMax="4"))
-	int32 ObstacleAwareTurnDeltaBuckets = 2;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Flight Model", meta=(ClampMin="1", ClampMax="10"))
+	int32 ObstacleAwareTurnDeltaBuckets = 4;
 
 	// Calculate route from UI input and return structured result
 	UFUNCTION(BlueprintCallable, Category = "Flight Pathfinding")
@@ -529,6 +574,7 @@ protected:
 		const FFlightPathState& FromState,
 		int32 HeadingDeltaBuckets,
 		int32 VerticalMode,
+		float LengthMultiplier,
 		TArray<FVector>& OutSamplePoints,
 		int32& OutEndHeading
 	) const;
@@ -538,6 +584,7 @@ protected:
 		const FFlightPathState& FromState,
 		int32 HeadingDeltaBuckets,
 		int32 VerticalMode,
+		float LengthMultiplier,
 		FFlightPathState& OutState
 	) const;
 
@@ -546,8 +593,12 @@ protected:
 		const FFlightPathState& FromState,
 		const FFlightPathState& ToState,
 		int32 HeadingDeltaBuckets,
-		int32 VerticalMode
+		int32 VerticalMode,
+		float LengthMultiplier
 	) const;
+
+	// Get the primitive length multipliers to try for one neighbor expansion
+	void GetPrimitiveLengthMultipliers(TArray<float, TInlineAllocator<3>>& OutMultipliers) const;
 
 	// Get signed turn direction between heading buckets
 	int32 GetSignedHeadingDeltaBuckets(int32 FromHeading, int32 ToHeading) const;
@@ -655,6 +706,13 @@ protected:
 		TArray<FVector>& OutRoutePoints
 	);
 
+	// Last-resort climb/cruise/descend fallback when the primitive search only finds degenerate routes
+	bool TryBuildHighAltitudeCrossingRoute(
+		const FVector& StartWorldLocation,
+		const FVector& TargetWorldLocation,
+		TArray<FVector>& OutRoutePoints
+	) const;
+
 	// Check if search can finish with a direct goal connection
 	bool CanConnectToGoal(
 		const FFlightPathState& Current,
@@ -743,8 +801,9 @@ protected:
 		float ToAltitudeMetersASL
 	) const;
 
-	// Generate valid next states for A*
-	void GetNeighbors(const FFlightPathState& Current, TArray<FFlightPathState>& OutNeighbors) const;
+	// Generate valid next states for A*.
+	// bUnrestrictedHeading allows the full heading range, for the start state's first expansion only.
+	void GetNeighbors(const FFlightPathState& Current, TArray<FFlightPathState>& OutNeighbors, bool bUnrestrictedHeading = false) const;
 
 	// Estimate remaining cost for A*
 	float HeuristicCost(const FFlightPathState& A, const FFlightPathState& B) const;
@@ -795,6 +854,9 @@ protected:
 	// Cached detour mode for inner A* loops
 	mutable bool bCachedHasActiveRoutingDetourObstacles = false;
 
+	// Forces detour-aware search settings once a direct route was rejected
+	mutable bool bForceDetourAwareSearch = false;
+
 	// Add penalty for immediate left-right turn changes
 	float CalculateTurnReversalPenalty(
 		const FFlightPathState& GrandParent,
@@ -813,9 +875,10 @@ protected:
 	// Validate references that are always required
 	bool ValidateCoreReferences() const;
 
-	// Build search space around a specific route request
+	// Build search space around a specific route request, padded by CorridorPaddingMeters
 	void BuildSearchSpaceForRoute(
 		const FVector& StartWorldLocation,
-		const FVector& TargetWorldLocation
+		const FVector& TargetWorldLocation,
+		float CorridorPaddingMeters
 	);
 };

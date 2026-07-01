@@ -20,6 +20,14 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Grid")
 	FVector GridMinWorld = FVector::ZeroVector;
 
+	// Real landscape footprint minimum (XY), without the grid's padding margin
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Grid")
+	FVector LandscapeMinWorld = FVector::ZeroVector;
+
+	// Real landscape footprint maximum (XY), without the grid's padding margin
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Grid")
+	FVector LandscapeMaxWorld = FVector::ZeroVector;
+
 	// Grid resolution in cells (X,Y)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Grid")
 	FIntPoint GridSize = FIntPoint(0, 0);
@@ -59,6 +67,20 @@ public:
 	int32 ToIndex(int32 X, int32 Y) const
 	{
 		return X + Y * GridSize.X;
+	}
+
+	// Check if a world XY position lies inside the real landscape footprint
+	UFUNCTION(BlueprintCallable, Category="Data")
+	bool IsInsideLandscapeBounds(float WorldX, float WorldY) const
+	{
+		if (LandscapeMinWorld.X >= LandscapeMaxWorld.X || LandscapeMinWorld.Y >= LandscapeMaxWorld.Y)
+		{
+			// Bounds not baked yet (older cache asset) -- don't reject
+			return true;
+		}
+
+		return WorldX >= LandscapeMinWorld.X && WorldX <= LandscapeMaxWorld.X &&
+			WorldY >= LandscapeMinWorld.Y && WorldY <= LandscapeMaxWorld.Y;
 	}
 
 	// Get height above sea level in meters
